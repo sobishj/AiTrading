@@ -1,0 +1,38 @@
+services:
+  postgres:
+    image: pgvector/pgvector:pg17
+    container_name: tradeai-pg
+    restart: unless-stopped
+
+    environment:
+      POSTGRES_DB: tradeai
+      POSTGRES_USER: tradeai
+      POSTGRES_PASSWORD: tradeai
+
+    ports:
+      - "5433:5432"
+
+    volumes:
+      - tradeai_pgdata:/var/lib/postgresql/data
+
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    container_name: tradeai-pgadmin
+    restart: unless-stopped
+
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@example.com
+      PGADMIN_DEFAULT_PASSWORD: admin123
+
+    ports:
+      - "5050:80"
+
+    depends_on:
+      - postgres
+
+    volumes:
+      - tradeai_pgadmin_data:/var/lib/pgadmin
+
+volumes:
+  tradeai_pgdata:
+  tradeai_pgadmin_data:

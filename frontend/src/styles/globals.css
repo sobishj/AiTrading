@@ -1,0 +1,224 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  /* Dark theme (default). RGB channels, consumed by tailwind.config.js. */
+  :root {
+    color-scheme: dark;
+    --base-950: 5 7 13;
+    --base-900: 10 14 23;
+    --base-800: 15 20 32;
+    --base-700: 22 28 44;
+    --base-600: 35 42 61;
+    --neon-blue: 59 167 255;
+    --neon-purple: 155 107 255;
+    --neon-emerald: 34 211 165;
+    --neon-rose: 255 92 122;
+    --amber-300: 252 211 77;
+    --overlay: 255 255 255;
+    --glow-strength: 0.25;
+    --slate-50: 248 250 252;
+    --slate-100: 241 245 249;
+    --slate-200: 226 232 240;
+    --slate-300: 203 213 225;
+    --slate-400: 148 163 184;
+    --slate-500: 100 116 139;
+    --slate-600: 71 85 105;
+    --slate-700: 51 65 85;
+    --slate-800: 30 41 59;
+    --slate-900: 15 23 42;
+    --page-glow-a: rgba(59, 167, 255, 0.08);
+    --page-glow-b: rgba(155, 107, 255, 0.08);
+  }
+
+  /* Light theme: bright surfaces, the slate text scale inverted, deeper accents for contrast. */
+  html.light {
+    color-scheme: light;
+    --base-950: 236 240 247;
+    --base-900: 255 255 255;
+    --base-800: 244 246 251;
+    --base-700: 226 232 240;
+    --base-600: 203 213 225;
+    --neon-blue: 22 104 214;
+    --neon-purple: 109 64 217;
+    --neon-emerald: 4 140 100;
+    --neon-rose: 214 31 72;
+    --amber-300: 180 83 9;
+    --overlay: 15 23 42;
+    --glow-strength: 0.12;
+    --slate-50: 2 6 23;
+    --slate-100: 15 23 42;
+    --slate-200: 30 41 59;
+    --slate-300: 51 65 85;
+    --slate-400: 71 85 105;
+    --slate-500: 100 116 139;
+    --slate-600: 148 163 184;
+    --slate-700: 203 213 225;
+    --slate-800: 226 232 240;
+    --slate-900: 241 245 249;
+    --page-glow-a: rgba(22, 104, 214, 0.07);
+    --page-glow-b: rgba(109, 64, 217, 0.06);
+  }
+
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+
+  body {
+    @apply bg-base-950 text-slate-100 antialiased;
+    background-image:
+      radial-gradient(ellipse 80% 50% at 20% 0%, var(--page-glow-a), transparent),
+      radial-gradient(ellipse 80% 50% at 80% 100%, var(--page-glow-b), transparent);
+    background-attachment: fixed;
+  }
+
+  ::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  ::-webkit-scrollbar-thumb {
+    @apply bg-base-600 rounded-full;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    @apply bg-neon-blue/40;
+  }
+}
+
+@layer components {
+  .glass-panel {
+    @apply bg-base-900/60 backdrop-blur-xs border border-white/5 rounded-2xl;
+  }
+
+  html.light .glass-panel {
+    @apply bg-base-900/90 border-white/10 shadow-sm;
+  }
+
+  .glass-panel-hover {
+    @apply transition-colors duration-200 hover:border-neon-blue/30;
+  }
+
+  .neon-text-blue {
+    @apply text-neon-blue drop-shadow-[0_0_6px_rgb(var(--neon-blue)/var(--glow-strength))];
+  }
+
+  .neon-text-emerald {
+    @apply text-neon-emerald drop-shadow-[0_0_6px_rgb(var(--neon-emerald)/var(--glow-strength))];
+  }
+
+  .pill {
+    @apply px-2.5 py-1 rounded-full text-xs font-medium tracking-wide;
+  }
+
+  .btn-primary {
+    @apply px-4 py-2 rounded-xl bg-gradient-to-r from-neon-blue to-neon-purple
+      text-onaccent font-medium text-sm shadow-glow
+      hover:brightness-110 active:brightness-95 transition-all duration-150;
+  }
+
+  .btn-secondary {
+    @apply px-4 py-2 rounded-xl border border-white/10 bg-white/5
+      text-slate-200 font-medium text-sm
+      hover:bg-white/10 hover:border-neon-blue/30 transition-all duration-150;
+  }
+
+  .fade-in {
+    animation: fadeIn 0.25s ease-out;
+  }
+}
+
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes pulseGlow {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 rgba(59, 167, 255, 0.4);
+  }
+  50% {
+    box-shadow: 0 0 0 6px rgba(59, 167, 255, 0);
+  }
+}
+
+.pulse-glow {
+  animation: pulseGlow 2s infinite;
+}
+
+/* Live re-ranking cue in the stock list: a brief glow on names that moved. */
+@keyframes rankFlashUp {
+  0% {
+    background-color: rgba(34, 211, 165, 0.22);
+  }
+  100% {
+    background-color: transparent;
+  }
+}
+
+@keyframes rankFlashDown {
+  0% {
+    background-color: rgba(255, 92, 122, 0.16);
+  }
+  100% {
+    background-color: transparent;
+  }
+}
+
+.rank-flash-up {
+  animation: rankFlashUp 6s ease-out;
+}
+
+.rank-flash-down {
+  animation: rankFlashDown 6s ease-out;
+}
+
+/* Resizable panel handles (react-resizable-panels). */
+.resize-handle {
+  position: relative;
+  flex: 0 0 12px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  outline: none;
+}
+.resize-handle[data-panel-group-direction="vertical"] {
+  flex-basis: 12px;
+}
+.resize-handle::after {
+  content: "";
+  border-radius: 9999px;
+  background: rgb(var(--overlay) / 0.08);
+  transition: background 0.15s ease;
+}
+.resize-handle[data-panel-group-direction="horizontal"]::after {
+  width: 3px;
+  height: 40px;
+}
+.resize-handle[data-panel-group-direction="vertical"]::after {
+  height: 3px;
+  width: 40px;
+}
+.resize-handle:hover::after,
+.resize-handle[data-resize-handle-state="drag"]::after {
+  background: rgb(var(--neon-blue) / 0.7);
+}
+.resize-handle[data-panel-group-direction="horizontal"]:hover::after,
+.resize-handle[data-panel-group-direction="horizontal"][data-resize-handle-state="drag"]::after {
+  height: 100%;
+}
+.resize-handle[data-panel-group-direction="vertical"]:hover::after,
+.resize-handle[data-panel-group-direction="vertical"][data-resize-handle-state="drag"]::after {
+  width: 100%;
+}
