@@ -1,4 +1,4 @@
-# TradeAI — Tasks
+# AiTrading — Tasks
 
 _Last updated: 2026-09-24._ Status against PRD v2.0.
 
@@ -39,8 +39,24 @@ _Last updated: 2026-09-24._ Status against PRD v2.0.
 - [x] AI practice on historical charts whenever the market is closed (random stock + past date, chart only up to that day, date hidden, graded instantly; up to 400/day; pauses while you chat; separate track record, never earns ranking weight; triggers a lesson review every 20 cases)
 - [x] AI next-session market outlook at 20:00 and 07:45 IST (headlines since close + global cues + FII/DII → NIFTY bias, probability, sector impacts); graded after the session; shown in the brief bar, brief, stock analysis (its sector) and chat
 - [x] Probabilities clamped to 10–90% (a small model sometimes answers 0% or 100%)
+- [x] Holdings: record buys (averaging), partial/full sells and your own stop-loss/target (defaults from the AI plan); Holdings tab + "I bought this" on the Trade Plan
+- [x] Continuous holding monitor (every minute in market hours, 30 min otherwise): stop hit / near stop, target hit / near target, "protect your gain" at 1R+, loss-risk score 0-100 with reasons (trend, MACD, heavy selling, AVOID rating, AI news, AI forecast, sector outlook, regime); alerts in-app (bell), browser and Windows notifications
+- [x] Holdings learning: every sale is a real trade (qty x P&L) in trade_history -> strategy stats and weight recalibration; risk warnings graded after 5 trading days; the loss-risk threshold adapts to their measured reliability
+- [x] Holding window (click a holding): edit/delete any recorded buy or sale (quantity, price, date — cost and P&L recomputed from all transactions), stop-loss/target with the AI's current suggestion below (auto-fills empty fields, "Use AI values"), Mark as sold (full or partial, prefilled live price), alerts for that holding
+- [x] Sell suggestions: AI advice per holding (SELL at target or stop, CONSIDER SELLING on high loss risk, HOLD); SELL / WATCH badges in the Holdings list; "Mark all sold at ₹…" one click; stop/target alerts worded as sell suggestions
+- [x] Switchable AI models: saved profiles for local (Bionic, LM Studio, Ollama) and API providers (Claude via the Anthropic SDK; Kimi, OpenAI, OpenRouter, Gemini, custom via OpenAI-compatible); add / edit / delete / test / fetch models; separate chat vs background model; per-model daily request cap; chart practice only on models that allow it
 - [x] Light theme with a dark/light toggle in the top bar (CSS-variable palette; chart re-themes too; choice saved per browser)
 - [x] PROJECT_RULES.md, TASKS.md, ARCHITECTURE.md
+- [x] API keys in Windows Credential Manager (keyring); plain-text keys migrated at startup; `.gitignore` covers secret files
+- [x] Local runtimes as plain endpoints: vLLM and generic "Local — OpenAI-compatible API" presets; per-provider enabled / priority / temperature / max tokens / timeout / hourly cap / prices; live Connected status
+- [x] Research package per analysis (timestamped, hashed, `UNKNOWN` for missing data): SMA 20/50, 20-day VWAP, breakout/breakdown flags, detailed market regimes, market-moving news with ids
+- [x] AIOrchestrator: single / multi-model mode, "use all enabled", parallel calls, timeouts, one retry for transient errors, caps, failure isolation, fallback to the local model, 30-minute cache for unchanged data
+- [x] EvidenceEngine: fixed claim vocabulary checked against data (SUPPORTED / NOT_SUPPORTED / UNKNOWN / UNVERIFIABLE), news claims must cite a real headline, FACT vs MODEL_INTERPRETATION vs PREDICTION classification, level sanity checks
+- [x] ConsensusEngine: evidence × measured reliability weights (stated confidence not used), blend with measured factor history, disagreement preserved and explained
+- [x] Outcome tracking: MFE / MAE, target / stop hit, P&L of following the call; per-model performance by regime / setup / sector / dissent / calibration
+- [x] Pattern statistics from real outcomes: weekly factor study on ~3 years of daily bars (no LLM) + graded live analyses; retrieved into prompts
+- [x] Multi-model training export (JSONL) with data package, answers, evidence, consensus and outcomes
+- [x] UI: "Evidence-checked AI analysis" in the Analysis panel (signal, evidence ✓ / risks ⚠, historical evidence, disagreement, individual analyses); mode, presets, usage & cost in model settings; model performance and factor evidence in Learning
 
 ## Open decisions (need the product owner)
 
@@ -61,3 +77,7 @@ _Last updated: 2026-09-24._ Status against PRD v2.0.
 - [ ] Frontend component tests; an end-to-end smoke test
 - [ ] Fine-tune Qwen (LoRA) on the exported graded forecasts once there are several hundred and a GPU is available — then compare its hit rate against the prompt-only analyst before switching
 - [ ] Surface `trading_memory` similar setups in the Analysis panel once real embeddings are available
+- [ ] Multi-model next-session outlook (the outlook still runs on the background model; `ai_market_outlooks.role` is ready)
+- [ ] Statistical model (logistic regression / gradient boosting) on the stored feature snapshots once ~500 analyses are graded; compare against the LLM consensus before giving it weight
+- [ ] Test real Claude / Kimi keys end to end (only error paths are verified so far)
+- [ ] Factor study includes only today's tracked stocks (survivorship bias) — add delisted/index-history names if a source is found

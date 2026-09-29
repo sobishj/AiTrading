@@ -34,6 +34,8 @@ HOLDING_PERIOD_DAYS_FALLBACK = 10
 GRADING_LOOKBACK_LIMIT_DAYS = 90
 LINK_WINDOW_DAYS = 10  # a trade within this many days after a recommendation is linked to it
 UNLINKED = "Your own trades (unlinked)"
+# Trades the user actually made: imported from Zerodha or recorded as holdings in the app.
+REAL_SOURCES = {"zerodha", "manual"}
 
 
 def parse_holding_days(holding_period: str) -> int:
@@ -316,11 +318,11 @@ class LearningService:
         unlinked: list[tuple] = []
         for trade, rec in rows:
             if rec is None:
-                if trade.source == "zerodha":
+                if trade.source in REAL_SOURCES:
                     unlinked.append((trade, None))
                 continue
             current = by_rec.get(rec.id)
-            if current is None or (trade.source == "zerodha" and current[0].source != "zerodha"):
+            if current is None or (trade.source in REAL_SOURCES and current[0].source not in REAL_SOURCES):
                 by_rec[rec.id] = (trade, rec)
 
         buckets: dict[str, list[tuple]] = defaultdict(list)
@@ -343,7 +345,7 @@ class LearningService:
                 "losses": len(items) - wins,
                 "win_rate": round(wins / len(items) * 100, 1) if items else None,
                 "avg_return_pct": round(sum(returns) / len(returns), 2) if returns else None,
-                "real_trades": sum(1 for t, _ in items if t.source == "zerodha"),
+                "real_trades": sum(1 for t, _ in items if t.source in REAL_SOURCES),
             })
         return results
 
@@ -367,8 +369,11 @@ class LearningService:
 
         graded = await self.grade_matured_recommendations(db)
         recalibration = ranking_service.recalibrate_weights(db)
+        from position_service import position_service
+
         ai_graded = await ai_analyst_service.grade_predictions(db)
         await ai_analyst_service.grade_outlooks(db)
+        await position_service.grade_alerts(db)
         return {"graded": graded, "ai_forecasts_graded": ai_graded, "recalibration": recalibration,
                 "strategies": self.strategy_performance(db)}
 

@@ -7,7 +7,12 @@ import TradingViewChart from "./components/Chart/TradingViewChart";
 import LearningModal from "./components/Learning/LearningModal";
 import TopBar from "./components/Navigation/TopBar";
 import StockList from "./components/StockList/StockList";
+import HoldingWindow from "./components/Holdings/HoldingWindow";
+import HoldingsList from "./components/Holdings/HoldingsList";
+import PositionDialog from "./components/Holdings/PositionDialog";
+import ModelSettingsModal from "./components/Settings/ModelSettingsModal";
 import TradePlanCard from "./components/TradePlan/TradePlanCard";
+import { usePositions } from "./hooks/usePositions";
 import { useResource } from "./hooks/useResource";
 import { useStocks } from "./hooks/useStocks";
 import { useTheme } from "./hooks/useTheme";
@@ -19,11 +24,12 @@ import type { ListMode, MorningBrief } from "./services/types";
 // Fallback polling in case the WebSocket drops; the backend re-ranks on its own cadence.
 const STOCK_POLL_MS = 120_000;
 const STATUS_POLL_MS = 60_000;
-const LIST_MODE_KEY = "tradeai.listMode";
+const LIST_MODE_KEY = "aitrading.listMode";
 
 function readListMode(): ListMode {
   try {
-    return localStorage.getItem(LIST_MODE_KEY) === "manual" ? "manual" : "auto";
+    const saved = localStorage.getItem(LIST_MODE_KEY);
+    return saved === "manual" || saved === "holdings" ? saved : "auto";
   } catch {
     return "auto";
   }
@@ -34,6 +40,11 @@ export default function App() {
   const auto = useStocks("auto", STOCK_POLL_MS);
   const manual = useStocks("manual", STOCK_POLL_MS);
   const current = listMode === "manual" ? manual : auto;
+  const holdings = usePositions();
+  const [alertsKey, setAlertsKey] = useState(0);
+  const [modelsOpen, setModelsOpen] = useState(false);
+  const [addHoldingOpen, setAddHoldingOpen] = useState(false);
+  const [openHoldingId, setOpenHoldingId] = useState<number | null>(null);
   const stocks = current.stocks;
   const refreshAuto = auto.refresh;
   const refreshManual = manual.refresh;
@@ -68,7 +79,18 @@ export default function App() {
   }, []);
 
   const { connected } = useWebSocket((message) => {
+    if (message.type === "position_alerts") {
+      holdings.refresh();
+      setAlertsKey((k) => k + 1);
+      const top = [...message.alerts].sort((a, b) => (a.severity === "critical" ? -1 : b.severity === "critical" ? 1 : 0))[0];
+      if (top) {
+        setNotification(`${top.title} — ${top.message}`);
+        showBrowserNotification(top.title, top.message);
+      }
+      return;
+    }
     if (message.type === "ranking_update") {
+      holdings.refresh();
       refreshStocks();
       setLiveVersion((v) => v + 1);
       setStatusVersion((v) => v + 1);
@@ -117,11 +139,21 @@ export default function App() {
       } catch {
         /* storage unavailable */
       }
-      const next = mode === "manual" ? manual.stocks : auto.stocks;
-      if (!next.some((s) => s.symbol === selectedSymbol)) setSelectedSymbol(next[0]?.symbol ?? null);
+      const next = mode === "manual" ? manual.stocks.map((s) => s.symbol)
+        : mode === "holdings" ? holdings.positions.map((p) => p.symbol)
+        : auto.stocks.map((s) => s.symbol);
+      if (!next.includes(selectedSymbol ?? "")) setSelectedSymbol(next[0] ?? selectedSymbol);
     },
-    [auto.stocks, manual.stocks, selectedSymbol]
+    [auto.stocks, manual.stocks, holdings.positions, selectedSymbol]
   );
+
+  const selectedPosition = holdings.positions.find((p) => p.symbol === selectedSymbol) ?? null;
+  const onPositionChanged = useCallback(() => {
+    holdings.refresh();
+    setAlertsKey((k) => k + 1);
+    requestNotificationPermission();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [holdings.refresh]);
 
   const selected = useMemo(
     () => knownStocks.find((s) => s.symbol === selectedSymbol) ?? null,
@@ -191,6 +223,13 @@ export default function App() {
             onAddStock={handleAddToManual}
             onRefresh={handleRefresh}
             onOpenLearning={() => setLearningOpen(true)}
+            onOpenModels={() => setModelsOpen(true)}
+            alertsKey={alertsKey}
+            onAlertSelect={(symbol) => {
+              handleSelect(symbol);
+              const held = holdings.positions.find((p) => p.symbol === symbol);
+              if (held) setOpenHoldingId(held.id);
+            }}
             theme={theme}
             onToggleTheme={toggleTheme}
             onLayoutPreset={(preset) => setPresetRequest({ preset, id: Date.now() })}
@@ -208,13 +247,28 @@ export default function App() {
             onSelect={handleSelect}
             onAdd={handleAddToManual}
             onRemove={handleRemoveFromManual}
+            holdingsCount={holdings.positions.length}
+            holdingsView={
+              <HoldingsList
+                positions={holdings.positions}
+                loading={holdings.loading}
+                error={holdings.error}
+                selectedSymbol={selectedSymbol}
+                onSelect={handleSelect}
+                onAdd={() => setAddHoldingOpen(true)}
+                onOpen={(p) => setOpenHoldingId(p.id)}
+              />
+            }
           />
         }
         briefBar={
           <MorningBriefBar brief={brief} outlook={outlookResource.data} loading={briefResource.loading} onSelect={handleSelect} />
         }
         chart={<TradingViewChart symbol={selectedSymbol} name={selected?.name} refreshKey={liveVersion} theme={theme} />}
-        tradePlan={<TradePlanCard symbol={selectedSymbol} refreshKey={liveVersion} />}
+        tradePlan={
+          <TradePlanCard symbol={selectedSymbol} refreshKey={liveVersion} position={selectedPosition}
+            onPositionChanged={onPositionChanged} onOpenHolding={(p) => setOpenHoldingId(p.id)} />
+        }
         analysis={<AnalysisPanel symbol={selectedSymbol} refreshKey={liveVersion} llmAvailable={llmAvailable} />}
         presetRequest={presetRequest}
         chat={
@@ -228,6 +282,27 @@ export default function App() {
         }
       />
       <UpdateNotification message={notification} onDismiss={dismissNotification} />
+      {openHoldingId !== null && (
+        <HoldingWindow positionId={openHoldingId} onClose={() => setOpenHoldingId(null)} onChanged={onPositionChanged} />
+      )}
+      {modelsOpen && (
+        <ModelSettingsModal onClose={() => setModelsOpen(false)} onChanged={() => setStatusVersion((v) => v + 1)} />
+      )}
+      {addHoldingOpen && (
+        <PositionDialog
+          mode="buy"
+          knownStocks={knownStocks}
+          onClose={() => setAddHoldingOpen(false)}
+          onDone={(p) => {
+            setAddHoldingOpen(false);
+            onPositionChanged();
+            if (p) {
+              setSelectedSymbol(p.symbol);
+              setOpenHoldingId(p.id);
+            }
+          }}
+        />
+      )}
       {learningOpen && (
         <LearningModal
           onClose={() => {
@@ -238,4 +313,23 @@ export default function App() {
       )}
     </>
   );
+}
+
+/** Ask once for permission to show browser notifications for holding alerts. */
+function requestNotificationPermission() {
+  try {
+    if ("Notification" in window && Notification.permission === "default") Notification.requestPermission();
+  } catch {
+    /* not supported */
+  }
+}
+
+function showBrowserNotification(title: string, body: string) {
+  try {
+    if ("Notification" in window && Notification.permission === "granted" && document.visibilityState !== "visible") {
+      new Notification(`AiTrading — ${title}`, { body, tag: title });
+    }
+  } catch {
+    /* not supported */
+  }
 }

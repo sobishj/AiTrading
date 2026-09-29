@@ -19,7 +19,8 @@ psycopg2-binary==2.9.13
 pgvector==0.5.0
 
 # LLM orchestration
-semantic-kernel==1.44.1
+anthropic==1.9.0
+keyring==25.7.0
 openai==3.15.0
 
 # Market data / analysis

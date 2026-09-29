@@ -2,6 +2,7 @@ import { ReactNode, useEffect, useRef, useState } from "react";
 import { useResource } from "../../hooks/useResource";
 import apiService from "../../services/api";
 import type { AIView, StockAnalysis } from "../../services/types";
+import AIConsensusPanel from "./AIConsensusPanel";
 
 interface AnalysisPanelProps {
   symbol: string | null;
@@ -191,6 +192,8 @@ export default function AnalysisPanel({ symbol, refreshKey, llmAvailable }: Anal
             )}
 
             {analysis.ai_view && <AIViewSection view={analysis.ai_view} />}
+
+            <AIConsensusPanel symbol={analysis.symbol} />
 
             <Section title="Market context">
               <p className="text-xs text-slate-400 leading-relaxed">{analysis.market_context}</p>

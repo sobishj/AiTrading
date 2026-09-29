@@ -87,7 +87,7 @@ export default function ChatPanel({ symbol, name, topName, secondName, llmAvaila
         ))}
         {sending && (
           <div className="text-xs text-slate-500 animate-pulse">
-            TradeAI is thinking… (the local model can take up to a minute)
+            AiTrading is thinking… (the local model can take up to a minute)
           </div>
         )}
         {error && <div className="text-xs text-neon-rose">{error}</div>}

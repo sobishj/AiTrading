@@ -1,4 +1,4 @@
-import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
+import { FormEvent, ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import type { ListMode, Stock } from "../../services/types";
 import StockListItem from "./StockListItem";
 
@@ -14,6 +14,9 @@ interface StockListProps {
   onSelect: (symbol: string) => void;
   onAdd: (symbol: string) => Promise<void>;
   onRemove: (symbol: string) => Promise<void>;
+  /** Rendered in the Holdings tab (your positions, monitored by the AI). */
+  holdingsView: ReactNode;
+  holdingsCount: number;
 }
 
 const MOVE_HIGHLIGHT_MS = 6000;
@@ -29,6 +32,7 @@ const SYMBOL_RE = /^[A-Z0-9&-]{1,20}$/;
  */
 export default function StockList({
   mode, onModeChange, stocks, knownStocks, loading, error, selectedSymbol, onSelect, onAdd, onRemove,
+  holdingsView, holdingsCount,
 }: StockListProps) {
   const previousRanks = useRef<Map<string, number>>(new Map());
   const [moves, setMoves] = useState<Record<string, "up" | "down">>({});
@@ -111,22 +115,24 @@ export default function StockList({
     <div className="glass-panel h-full flex flex-col overflow-hidden">
       <div className="px-3 pt-3 pb-2 border-b border-white/5 space-y-2">
         <div className="flex items-center gap-1 bg-base-800/70 rounded-lg p-0.5 border border-white/5" role="tablist">
-          {(["auto", "manual"] as ListMode[]).map((m) => (
+          {(["auto", "manual", "holdings"] as ListMode[]).map((m) => (
             <button
               key={m}
               role="tab"
               aria-selected={mode === m}
               onClick={() => onModeChange(m)}
-              title={m === "auto" ? "AI-ranked market universe" : "Your own list — add and remove shares"}
+              title={m === "auto" ? "AI-ranked market universe" : m === "manual" ? "Your own list — add and remove shares"
+                : "Shares you bought — monitored for stop-loss, target and loss risk"}
               className={`flex-1 px-2 py-1 rounded-md text-xs font-medium transition-all duration-150 ${
                 mode === m ? "bg-neon-blue/15 text-neon-blue shadow-glow" : "text-slate-400 hover:text-slate-200"
               }`}
             >
-              {m === "auto" ? "Automatic" : "Manual"}
+              {m === "auto" ? "Auto" : m === "manual" ? "Manual" : `Holdings${holdingsCount ? ` ${holdingsCount}` : ""}`}
             </button>
           ))}
         </div>
 
+        {mode !== "holdings" && (
         <form onSubmit={handleSubmit}>
           <input
             value={query}
@@ -140,6 +146,7 @@ export default function StockList({
               placeholder:text-slate-500 focus:outline-none focus:border-neon-blue/50 transition-all duration-150"
           />
         </form>
+        )}
 
         {addSuggestions.length > 0 && (
           <div className="space-y-0.5">
@@ -158,6 +165,10 @@ export default function StockList({
         {actionError && <p className="text-[11px] text-neon-rose">{actionError}</p>}
       </div>
 
+      {mode === "holdings" ? (
+        <div className="flex-1 min-h-0 pt-2">{holdingsView}</div>
+      ) : (
+      <>
       <div className="flex-1 overflow-y-auto p-2 space-y-0.5">
         {loading && stocks.length === 0 && (
           <div className="text-xs text-slate-500 px-3 py-4 text-center">Ranking the market…</div>
@@ -196,6 +207,8 @@ export default function StockList({
           {q ? ` of ${stocks.length}` : ""} · best first
         </span>
       </div>
+      </>
+      )}
     </div>
   );
 }

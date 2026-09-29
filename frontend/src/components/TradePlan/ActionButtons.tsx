@@ -9,7 +9,7 @@ interface ActionButtonsProps {
 const KITE_BASKET_URL = "https://kite.zerodha.com/connect/basket";
 
 /**
- * Open the stock on Zerodha, or prepare the order via Kite Publisher. TradeAI
+ * Open the stock on Zerodha, or prepare the order via Kite Publisher. AiTrading
  * never places orders: Publisher opens Zerodha's own order window, where the
  * user reviews and confirms (PRD §17).
  */

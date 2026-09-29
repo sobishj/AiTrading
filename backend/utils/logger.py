@@ -1,5 +1,5 @@
 """
-Centralized logging setup for TradeAI backend.
+Centralized logging setup for AiTrading backend.
 
 Usage:
     from utils.logger import get_logger
@@ -36,7 +36,7 @@ def _configure_root_logger() -> None:
     console_handler.setFormatter(formatter)
 
     file_handler = RotatingFileHandler(
-        os.path.join(settings.LOG_DIR, "tradeai.log"),
+        os.path.join(settings.LOG_DIR, "aitrading.log"),
         maxBytes=5 * 1024 * 1024,
         backupCount=5,
         encoding="utf-8",

@@ -172,6 +172,50 @@ def parse_lessons(text: str) -> list[str]:
     return lessons[:MAX_LESSONS]
 
 
+def trade_outcome(entry: float, bars: pd.DataFrame, target: Optional[float], stop: Optional[float],
+                  recommendation: Optional[str]) -> dict:
+    """
+    Measured from real bars only: max favourable / adverse excursion (long view), whether the
+    target or stop traded, and the P&L of following the call (BUY = long, exit at stop, target or
+    the horizon close; SELL/AVOID = the move avoided). When a bar spans both levels the stop is
+    assumed first (conservative). Unknowns stay None.
+    """
+    highs, lows = bars["high"].astype(float), bars["low"].astype(float)
+    out = {"max_favorable_pct": round((highs.max() / entry - 1) * 100, 2),
+           "max_adverse_pct": round((lows.min() / entry - 1) * 100, 2),
+           "target_hit": None, "stop_hit": None, "pnl_pct": None}
+    rec = (recommendation or "").upper()
+    close = float(bars.iloc[-1]["close"])
+    if rec == "BUY":
+        if target is not None:
+            out["target_hit"] = bool((highs >= target).any())
+        if stop is not None:
+            out["stop_hit"] = bool((lows <= stop).any())
+        exit_price = close
+        for h, l in zip(highs, lows):
+            if stop is not None and l <= stop:
+                exit_price = stop
+                break
+            if target is not None and h >= target:
+                exit_price = target
+                break
+        out["pnl_pct"] = round((exit_price / entry - 1) * 100, 2)
+    elif rec in ("SELL", "AVOID"):
+        out["pnl_pct"] = round(-(close / entry - 1) * 100, 2)
+    return out
+
+
+def apply_outcome(prediction, bars: pd.DataFrame) -> None:
+    if bars.empty or not prediction.price_at_prediction:
+        return
+    o = trade_outcome(float(prediction.price_at_prediction), bars,
+                      float(prediction.target) if prediction.target is not None else None,
+                      float(prediction.stop_loss) if prediction.stop_loss is not None else None,
+                      prediction.recommendation)
+    prediction.max_favorable_pct, prediction.max_adverse_pct = o["max_favorable_pct"], o["max_adverse_pct"]
+    prediction.target_hit, prediction.stop_hit, prediction.outcome_pnl_pct = o["target_hit"], o["stop_hit"], o["pnl_pct"]
+
+
 def classify_return(return_pct: float) -> str:
     if return_pct > FLAT_BAND_PCT:
         return "up"
@@ -283,8 +327,10 @@ class AIAnalystService:
     # 2. Forecasts
     # ------------------------------------------------------------------
     def forecast_targets(self, db: Session, ranked: list) -> list:
-        """Top-ranked stocks plus everything on the Manual list, de-duplicated, in ranking order."""
+        """Top-ranked stocks plus the Manual list and open holdings, de-duplicated, in ranking order."""
+        from models import Position
         manual = {s.symbol for s in db.query(Stock).filter(Stock.in_manual_list.is_(True)).all()}
+        manual |= {p.stock.symbol for p in db.query(Position).filter(Position.status == "open").all()}
         chosen = []
         for item in ranked:
             if (len(chosen) < TOP_N_DAILY or item.symbol in manual) and item.technical.has_data:
@@ -292,9 +338,28 @@ class AIAnalystService:
         return chosen
 
     async def make_daily_predictions(self, db: Session, ranked: list, force: bool = False) -> int:
+        from ai_orchestrator import ai_orchestrator
+
+        multi = ai_orchestrator.mode(db) == "multi"
         made = 0
         for item in self.forecast_targets(db, ranked):
-            if await self.predict_stock(db, item, force=force) is not None:
+            if multi:
+                # Every enabled model analyses independently; the evidence-weighted consensus becomes
+                # the day's primary forecast (graded, trusted and used exactly like the single-model one).
+                exists = (db.query(AIPrediction.id)
+                          .filter(AIPrediction.stock_id == item.stock_id, AIPrediction.prediction_date == today_ist(),
+                                  AIPrediction.kind == "live", AIPrediction.role == "primary").first())
+                if exists and not force:
+                    continue
+                try:
+                    result = await ai_orchestrator.analyze(db, item, trigger="daily", force=True)
+                except Exception as exc:  # noqa: BLE001  (one stock's failure must not stop the batch)
+                    logger.error("Multi-model forecast for %s failed: %s", item.symbol, exc)
+                    db.rollback()
+                    continue
+                if result and result.get("available"):
+                    made += 1
+            elif await self.predict_stock(db, item, force=force) is not None:
                 made += 1
         if made:
             logger.info("AI analyst made %d forecast(s) for %s", made, today_ist())
@@ -304,7 +369,7 @@ class AIAnalystService:
         today = today_ist()
         existing = (db.query(AIPrediction)
                     .filter(AIPrediction.stock_id == item.stock_id, AIPrediction.prediction_date == today,
-                            AIPrediction.kind == "live").first())
+                            AIPrediction.kind == "live", AIPrediction.role == "primary").first())
         if existing is not None and not force:
             return None
 
@@ -318,7 +383,8 @@ class AIAnalystService:
             return None
 
         version, _ = self.current_lessons(db)
-        prediction = existing or AIPrediction(stock_id=item.stock_id, prediction_date=today, kind="live")
+        prediction = existing or AIPrediction(stock_id=item.stock_id, prediction_date=today, kind="live",
+                                              role="primary")
         prediction.horizon_days = HORIZON_DAYS
         prediction.direction = parsed["direction"]
         prediction.probability_up = parsed["probability_up"]
@@ -367,7 +433,7 @@ class AIAnalystService:
     def own_history_text(self, db: Session, stock_id: int, limit: int = 5) -> str:
         rows = (db.query(AIPrediction)
                 .filter(AIPrediction.stock_id == stock_id, AIPrediction.graded_at.isnot(None),
-                        AIPrediction.kind == "live")
+                        AIPrediction.kind == "live", AIPrediction.role == "primary")
                 .order_by(AIPrediction.prediction_date.desc()).limit(limit).all())
         if not rows:
             return "none graded yet"
@@ -380,7 +446,7 @@ class AIAnalystService:
         """Latest forecast per symbol made within the last 3 days (so weekends keep Friday's view)."""
         cutoff = today_ist() - timedelta(days=3)
         rows = (db.query(AIPrediction, Stock.symbol).join(Stock, AIPrediction.stock_id == Stock.id)
-                .filter(AIPrediction.prediction_date >= cutoff, AIPrediction.kind == "live")
+                .filter(AIPrediction.prediction_date >= cutoff, AIPrediction.kind == "live", AIPrediction.role == "primary")
                 .order_by(AIPrediction.prediction_date.asc(), AIPrediction.id.asc()).all())
         return {symbol: prediction for prediction, symbol in rows}
 
@@ -412,16 +478,32 @@ class AIAnalystService:
             prediction.actual_return_pct = round(ret, 2)
             prediction.actual_direction = classify_return(ret)
             prediction.correct = is_correct(prediction.direction, ret)
+            apply_outcome(prediction, after.iloc[: prediction.horizon_days])
             prediction.graded_at = datetime.utcnow()
             graded += 1
         db.commit()
         if graded:
             logger.info("Graded %d AI forecast(s)", graded)
+            try:
+                from knowledge_service import knowledge_service
+                knowledge_service.update_live_stats(db)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Live pattern statistics not updated: %s", exc)
+                db.rollback()
         return graded
 
     # ------------------------------------------------------------------
     # 4. Reflection -> lessons
     # ------------------------------------------------------------------
+    @staticmethod
+    def _own_rows_filter(db: Session):
+        """The background model's own forecasts: single-model primary rows plus its member rows in multi-model runs."""
+        from sqlalchemy import and_, or_
+        cfg = db.get(AppSettings, 1)
+        bg = cfg.background_profile_id if cfg else None
+        return or_(and_(AIPrediction.role == "primary", AIPrediction.model != "consensus"),
+                   and_(AIPrediction.role == "member", AIPrediction.profile_id == bg))
+
     def current_lessons(self, db: Session) -> tuple[int, list[str]]:
         latest = db.query(AILesson).order_by(AILesson.version.desc()).first()
         if latest is None:
@@ -431,10 +513,12 @@ class AIAnalystService:
     async def reflect(self, db: Session, force: bool = False) -> Optional[AILesson]:
         latest = db.query(AILesson).order_by(AILesson.version.desc()).first()
         since = latest.created_at if latest else datetime.min
+        own = self._own_rows_filter(db)
+
         def new_since(kind: str) -> int:
             return (db.query(AIPrediction)
                     .filter(AIPrediction.graded_at.isnot(None), AIPrediction.graded_at > since,
-                            AIPrediction.kind == kind).count())
+                            AIPrediction.kind == kind, own).count())
 
         if (not force and new_since("live") < MIN_NEW_GRADES_FOR_REFLECTION
                 and new_since("practice") < PRACTICE_GRADES_PER_REFLECTION):
@@ -442,7 +526,7 @@ class AIAnalystService:
 
         def latest_graded(kind: str, limit: int) -> list:
             return (db.query(AIPrediction, Stock).join(Stock, AIPrediction.stock_id == Stock.id)
-                    .filter(AIPrediction.graded_at.isnot(None), AIPrediction.kind == kind)
+                    .filter(AIPrediction.graded_at.isnot(None), AIPrediction.kind == kind, own)
                     .order_by(AIPrediction.graded_at.desc()).limit(limit).all())
 
         recent = latest_graded("live", 8) + latest_graded("practice", 12)
@@ -484,9 +568,10 @@ class AIAnalystService:
     # ------------------------------------------------------------------
     def performance(self, db: Session, kind: str = "live") -> dict:
         """Track record for live forecasts (default; the only kind that earns trust) or practice."""
-        graded = (db.query(AIPrediction).filter(AIPrediction.graded_at.isnot(None), AIPrediction.kind == kind)
+        graded = (db.query(AIPrediction).filter(AIPrediction.graded_at.isnot(None), AIPrediction.kind == kind,
+                                                AIPrediction.role == "primary")
                   .order_by(AIPrediction.graded_at.asc()).all())
-        total = db.query(AIPrediction).filter(AIPrediction.kind == kind).count()
+        total = db.query(AIPrediction).filter(AIPrediction.kind == kind, AIPrediction.role == "primary").count()
         n = len(graded)
         result = {"total_forecasts": total, "graded": n, "pending": total - n, "hit_rate": None, "brier": None,
                   "baseline_hit_rate": None, "edge": None, "trust_weight": 0.0, "by_week": [],

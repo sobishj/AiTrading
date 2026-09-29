@@ -75,7 +75,7 @@ class InsightService:
         learned = strategy_stats.get(item.strategy)
         if learned and learned["trades"]:
             historical_notes.append(
-                f"Across TradeAI's graded calls and your trades, {item.strategy} has won "
+                f"Across AiTrading's graded calls and your trades, {item.strategy} has won "
                 f"{learned['win_rate']:.0f}% of {learned['trades']} trades (avg {learned['avg_return_pct']:+.1f}%)."
             )
         past_recs = (
@@ -170,7 +170,7 @@ class InsightService:
         ranked_at = ranking_service.last_ranked_at
         if cached and cached[1] == ranked_at and time.monotonic() - cached[0] < NARRATIVE_CACHE_SECONDS:
             return cached[2]
-        if not await llm_service.is_available():
+        if not await llm_service.is_available("chat"):
             return None
 
         a = self.build_analysis(db, item)
@@ -216,7 +216,7 @@ class InsightService:
             lines.append(f"Focus stock (the one the user is viewing): {selected.name} ({selected.symbol}), "
                          f"sector {selected.sector or 'n/a'}, rank #{selected.rank or 'n/a'} of {len(ranked)}.")
             if plan:
-                lines.append(f"  TradeAI's call on it: {plan.action} ({plan.strategy}), conviction "
+                lines.append(f"  AiTrading's call on it: {plan.action} ({plan.strategy}), conviction "
                              f"{selected.conviction_score:.0f}/100.")
             lines.append("  Key facts in words: " + "; ".join(self._plain_facts(selected)) + ".")
             lines.append(
@@ -253,7 +253,9 @@ class InsightService:
                 f"{c['timestamp'][11:16]} UTC {c['symbol']}: {c['reason']}" for c in changes))
 
         from ai_analyst_service import ai_analyst_service
+        from position_service import position_service
 
+        lines.extend(position_service.chat_lines(db))
         if selected is not None:
             prediction = ai_analyst_service.todays_predictions(db).get(selected.symbol)
             if prediction is not None:

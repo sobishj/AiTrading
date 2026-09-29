@@ -3,11 +3,22 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>TradeAI</title>
+    <title>AiTrading</title>
     <script>
+      // One-time migration of browser settings saved under the project's old name
+      // (theme, list mode, chart drawings, panel sizes).
+      try {
+        for (var i = localStorage.length - 1; i >= 0; i--) {
+          var key = localStorage.key(i);
+          if (!key || key.indexOf("tradeai") === -1) continue;
+          var renamed = key.replace("tradeai", "aitrading");
+          if (localStorage.getItem(renamed) === null) localStorage.setItem(renamed, localStorage.getItem(key));
+          localStorage.removeItem(key);
+        }
+      } catch (e) {}
       // Apply the saved theme before first paint so there's no dark/light flash.
       try {
-        if (localStorage.getItem("tradeai.theme") === "light") {
+        if (localStorage.getItem("aitrading.theme") === "light") {
           document.documentElement.classList.replace("dark", "light");
         }
       } catch (e) {}

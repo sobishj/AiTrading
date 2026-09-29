@@ -3,6 +3,7 @@ import { useResource } from "../../hooks/useResource";
 import { useSettings } from "../../hooks/useSettings";
 import apiService from "../../services/api";
 import type { TradeUploadResult } from "../../services/types";
+import ModelEvidenceSection from "./ModelEvidenceSection";
 
 interface LearningModalProps {
   onClose: () => void;
@@ -23,6 +24,7 @@ export default function LearningModal({ onClose }: LearningModalProps) {
   const strategies = useResource(() => apiService.getStrategies(), [version], true);
   const trades = useResource(() => apiService.getTradeHistory(30), [version], true);
   const ai = useResource(() => apiService.getAIPerformance(), [version], true);
+  const holdingsLearning = useResource(() => apiService.getHoldingsLearning(), [version], true);
   const aiForecasts = useResource(() => apiService.getAIPredictions(15), [version], true);
   const [aiMessage, setAiMessage] = useState<string | null>(null);
   const { settings, saving, error: settingsError, setRisk } = useSettings();
@@ -128,7 +130,7 @@ export default function LearningModal({ onClose }: LearningModalProps) {
             <div className="text-xs text-slate-300 space-y-1">
               <p>
                 {result.rows_processed} executions read · {result.rows_imported} closed trades imported ·{" "}
-                {result.open_positions} open positions · {result.linked_to_recommendations} linked to TradeAI calls ·{" "}
+                {result.open_positions} open positions · {result.linked_to_recommendations} linked to AiTrading calls ·{" "}
                 {result.duplicates_skipped} duplicates skipped · {result.graded} recommendations auto-graded
               </p>
               {result.recalibration && (
@@ -149,6 +151,45 @@ export default function LearningModal({ onClose }: LearningModalProps) {
             </div>
           )}
         </section>
+
+        {holdingsLearning.data && (
+          <section className="space-y-2">
+            <h4 className="text-xs uppercase tracking-widest text-slate-400">Your holdings — what the AI learned</h4>
+            <p className="text-xs text-slate-500">
+              Every sale you record becomes a real trade (quantity and rupee P&L) in the strategy statistics. Each
+              "risk of loss" / "near stop" warning is checked 5 trading days later — did the price actually fall? —
+              and the warning threshold adapts: fewer false alarms if warnings were often wrong, earlier warnings if
+              they were usually right.
+            </p>
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+              <div className="glass-panel px-3 py-2">
+                <div className="text-[11px] uppercase tracking-wide text-slate-500">Booked P&L</div>
+                <div className={`text-sm font-semibold font-mono ${holdingsLearning.data.realized_pnl >= 0 ? "text-neon-emerald" : "text-neon-rose"}`}>
+                  ₹{holdingsLearning.data.realized_pnl.toLocaleString("en-IN")}
+                </div>
+              </div>
+              <div className="glass-panel px-3 py-2">
+                <div className="text-[11px] uppercase tracking-wide text-slate-500">Closed holdings</div>
+                <div className="text-sm font-semibold font-mono">
+                  {holdingsLearning.data.closed_positions}
+                  {holdingsLearning.data.closed_win_rate !== null && ` · ${holdingsLearning.data.closed_win_rate.toFixed(0)}% won`}
+                </div>
+              </div>
+              {holdingsLearning.data.alerts.map((a) => (
+                <div key={a.kind} className="glass-panel px-3 py-2">
+                  <div className="text-[11px] uppercase tracking-wide text-slate-500">{a.kind === "loss_risk" ? "Risk warnings" : "Near-stop warnings"}</div>
+                  <div className="text-sm font-semibold font-mono">{a.precision !== null ? `${a.precision.toFixed(0)}% right` : "—"}</div>
+                  <div className="text-[10px] text-slate-500">{a.graded} graded</div>
+                </div>
+              ))}
+            </div>
+            <p className="text-[11px] text-slate-500">
+              Current loss-risk alert threshold: {holdingsLearning.data.risk_threshold}/100
+              {holdingsLearning.data.risk_threshold !== holdingsLearning.data.base_risk_threshold
+                ? ` (adapted from ${holdingsLearning.data.base_risk_threshold})` : " (adapts after 20 graded warnings)"}
+            </p>
+          </section>
+        )}
 
         <section className="space-y-2">
           <h4 className="text-xs uppercase tracking-widest text-slate-400">AI analyst (Qwen) track record</h4>
@@ -284,10 +325,12 @@ export default function LearningModal({ onClose }: LearningModalProps) {
           {aiMessage && <p className="text-xs text-slate-400">{aiMessage}</p>}
         </section>
 
+        <ModelEvidenceSection version={version} />
+
         <section className="space-y-2">
           <h4 className="text-xs uppercase tracking-widest text-slate-400">Strategy library</h4>
           <p className="text-xs text-slate-500">
-            Performance learned from graded TradeAI calls and your real trades. Once a strategy has 8+ trades, its win
+            Performance learned from graded AiTrading calls and your real trades. Once a strategy has 8+ trades, its win
             rate nudges conviction for new setups of that type (±5 points).
           </p>
           <table className="w-full text-sm">

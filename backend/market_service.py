@@ -103,6 +103,44 @@ def keyword_pattern(keywords: list[str]) -> Optional[re.Pattern]:
     return re.compile("|".join(parts)) if parts else None
 
 
+# Headlines that tend to move the whole market rather than one stock.
+_MARKET_MOVING = re.compile(
+    r"\b(rbi|repo rate|monetary policy|mpc|fed|fomc|interest rate|rate (cut|hike)|inflation|cpi|wpi|gdp|"
+    r"budget|fiscal|crude|oil price|rupee|dollar index|bond yield|treasury|tariff|sanction|war|ceasefire|"
+    r"sebi|election|fii|fpi|foreign investors|recession|stimulus|nifty|sensex|global markets|wall street)\b",
+    re.IGNORECASE,
+)
+
+
+def is_market_moving(text: str) -> bool:
+    """True for macro/policy/flow headlines that usually affect the broad market (a keyword rule, not a prediction)."""
+    return bool(_MARKET_MOVING.search(text or ""))
+
+
+def classify_regimes(trend: str, vix: Optional[float], nifty_change: Optional[float],
+                     atr_pct: Optional[float], market_moving_news: int) -> list[str]:
+    """
+    Detailed market regimes (several can apply at once), each from measured data:
+    BULLISH / BEARISH / SIDEWAYS from the NIFTY trend; HIGH_ / LOW_VOLATILITY from India VIX
+    (or NIFTY ATR% when VIX is missing); NEWS_DRIVEN from recent market-moving headlines.
+    """
+    regimes = []
+    regimes.append({"uptrend": "BULLISH", "downtrend": "BEARISH"}.get(trend, "SIDEWAYS"))
+    if vix is not None:
+        if vix >= 20:
+            regimes.append("HIGH_VOLATILITY")
+        elif vix <= 13:
+            regimes.append("LOW_VOLATILITY")
+    elif atr_pct is not None:
+        if atr_pct >= 1.8:
+            regimes.append("HIGH_VOLATILITY")
+        elif atr_pct <= 0.8:
+            regimes.append("LOW_VOLATILITY")
+    if market_moving_news >= 4 or (market_moving_news >= 2 and nifty_change is not None and abs(nifty_change) >= 1.2):
+        regimes.append("NEWS_DRIVEN")
+    return regimes
+
+
 def headline_sentiment(text: str) -> int:
     """+1 / 0 / -1 from whole-word keyword counts (no substring false hits like 'up' in 'update')."""
     words = set(_WORD_RE.findall(text.lower()))
@@ -229,6 +267,7 @@ class MarketService:
                     "link": entry.get("link", ""),
                     "source": source,
                     "sentiment": headline_sentiment(title + " " + summary),
+                    "market_moving": is_market_moving(title),
                 })
 
         items.sort(key=lambda i: i["published"], reverse=True)
@@ -346,9 +385,14 @@ class MarketService:
         else:
             regime = "neutral"
 
+        recent_cutoff = (datetime.now(IST) - timedelta(hours=12)).isoformat()
+        moving = sum(1 for n in self._news_cache if n.get("market_moving") and n.get("published", "") >= recent_cutoff)
         overview = {
             "as_of": datetime.now(IST).isoformat(),
             "regime": regime,
+            "regimes": classify_regimes(nifty.trend if nifty.has_data else "unknown", vix, nifty_change,
+                                        nifty.atr_pct, moving),
+            "market_moving_news": moving,
             "nifty": {
                 "price": nifty.close, "change_pct": nifty_change, "trend": nifty.trend,
                 "ema_20": nifty.ema_20, "ema_50": nifty.ema_50, "ema_200": nifty.ema_200,

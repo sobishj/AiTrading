@@ -1,5 +1,5 @@
 """
-API routes for TradeAI: live ranking, trade plans, analysis, chat, learning
+API routes for AiTrading: live ranking, trade plans, analysis, chat, learning
 (trade uploads, strategy performance), market context, morning brief,
 settings, and the real-time WebSocket updates feed.
 """
@@ -144,8 +144,11 @@ async def get_status():
     return {
         "data_source": market_service.data_source,
         "kite_connected": kite_service.is_configured,
-        "llm_available": await llm_service.is_available(),
-        "llm_model": settings.LLM_MODEL,
+        "llm_available": await llm_service.is_available("chat"),
+        "background_llm_available": await llm_service.is_available("background"),
+        "llm_model": (llm_service.active("chat").name + " · " + llm_service.active("chat").model)
+                     if llm_service.active("chat") else settings.LLM_MODEL,
+        "models": llm_service.describe(),
         "last_ranked_at": ranking_service.last_ranked_at.isoformat() if ranking_service.last_ranked_at else None,
         "market_regime": ranking_service.context.market_regime,
     }
@@ -412,7 +415,7 @@ async def get_stock_narrative(symbol: str, db: Session = Depends(get_db)):
 @router.get("/stocks/{symbol}/order-basket", response_model=OrderBasketResponse)
 async def get_order_basket(symbol: str, db: Session = Depends(get_db)):
     """
-    A prepared LIMIT order for Kite Publisher. TradeAI never places orders:
+    A prepared LIMIT order for Kite Publisher. AiTrading never places orders:
     the browser posts this basket to Zerodha, where the user reviews and
     confirms it themselves.
     """
@@ -607,7 +610,8 @@ async def get_ai_performance(db: Session = Depends(get_db)):
 
     version, lessons = ai_analyst_service.current_lessons(db)
     return {**ai_analyst_service.performance(db), "lessons_version": version, "lessons": lessons,
-            "enabled": settings.AI_ANALYST_ENABLED, "llm_available": await llm_service.is_available(),
+            "enabled": settings.AI_ANALYST_ENABLED, "llm_available": await llm_service.is_available("background"),
+            "practice_allowed_by_model": llm_service.practice_allowed(),
             "practice": ai_analyst_service.performance(db, kind="practice"),
             "practice_enabled": ai_analyst_service.practice_enabled(db),
             "practice_today": ai_analyst_service.practice_done_today(db),
@@ -663,7 +667,7 @@ async def get_ai_predictions(symbol: Optional[str] = None, limit: int = 50,
     query = db.query(AIPrediction, Stock).join(Stock, AIPrediction.stock_id == Stock.id)
     if symbol:
         query = query.filter(Stock.symbol == validate_symbol(symbol))
-    query = query.filter(AIPrediction.kind == kind)
+    query = query.filter(AIPrediction.kind == kind, AIPrediction.role == "primary")
     order = AIPrediction.id.desc() if kind == "practice" else AIPrediction.prediction_date.desc()
     rows = query.order_by(order, AIPrediction.id.desc()).limit(min(limit, 500)).all()
     return [{
@@ -699,7 +703,7 @@ async def get_ai_training_data(db: Session = Depends(get_db)):
     """Graded forecasts as JSONL (prompt, model answer, outcome) — a dataset for fine-tuning later."""
     rows = [json.dumps(example, ensure_ascii=False) for example in ai_analyst_service.training_examples(db)]
     return StreamingResponse(iter([line + "\n" for line in rows]), media_type="application/x-ndjson",
-                             headers={"Content-Disposition": "attachment; filename=tradeai-ai-forecasts.jsonl"})
+                             headers={"Content-Disposition": "attachment; filename=aitrading-ai-forecasts.jsonl"})
 
 
 # ---------------------------------------------------------------------------

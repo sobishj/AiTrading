@@ -1,5 +1,5 @@
 """
-Pydantic request/response schemas for the TradeAI API.
+Pydantic request/response schemas for the AiTrading API.
 """
 from datetime import date, datetime
 from typing import Optional
@@ -298,6 +298,7 @@ class AppSettingsResponse(BaseModel):
     weight_volume: float
     capital: Optional[float] = None
     risk_per_trade_pct: Optional[float] = None
+    desktop_notifications: Optional[bool] = None
     updated_at: datetime
 
 

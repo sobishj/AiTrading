@@ -2,6 +2,7 @@ import { FormEvent, useState } from "react";
 import type { Theme } from "../../hooks/useTheme";
 import type { LayoutPreset } from "../../layouts/MainLayout";
 import type { AppStatus, Stock } from "../../services/types";
+import AlertsBell from "./AlertsBell";
 import RefreshIntervalControl from "./RefreshIntervalControl";
 
 interface TopBarProps {
@@ -13,6 +14,9 @@ interface TopBarProps {
   onAddStock: (symbol: string) => Promise<void>;
   onRefresh: () => void;
   onOpenLearning: () => void;
+  onOpenModels: () => void;
+  alertsKey: number;
+  onAlertSelect: (symbol: string) => void;
   theme: Theme;
   onToggleTheme: () => void;
   onLayoutPreset: (preset: LayoutPreset) => void;
@@ -66,7 +70,7 @@ function StatusDot({ ok, label, title }: { ok: boolean; label: string; title: st
 /** PRD §5 top bar: brand, live status, search (jump to any share, or add an NSE symbol to your list), refresh, learning. */
 export default function TopBar({
   stocks, status, connected, refreshing, onSelect, onAddStock, onRefresh, onOpenLearning,
-  theme, onToggleTheme, onLayoutPreset,
+  theme, onToggleTheme, onLayoutPreset, onOpenModels, alertsKey, onAlertSelect,
 }: TopBarProps) {
   const [query, setQuery] = useState("");
   const [adding, setAdding] = useState(false);
@@ -113,10 +117,10 @@ export default function TopBar({
     <header className="h-14 flex items-center justify-between gap-4 px-5 glass-panel rounded-none border-x-0 border-t-0 relative z-40">
       <div className="flex items-center gap-3 shrink-0">
         <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-neon-blue to-neon-purple shadow-glow flex items-center justify-center font-bold text-sm">
-          T
+          A
         </div>
         <span className="font-semibold text-lg tracking-tight">
-          Trade<span className="neon-text-blue">AI</span>
+          Ai<span className="neon-text-blue">Trading</span>
         </span>
         <div className="hidden lg:flex items-center gap-3 ml-3">
           <StatusDot ok={connected} label={connected ? "Live" : "Offline"} title="Real-time updates connection" />
@@ -183,6 +187,14 @@ export default function TopBar({
         <RefreshIntervalControl />
         <button onClick={onRefresh} disabled={refreshing} className="btn-secondary px-3 py-1.5 text-xs disabled:opacity-50" title="Re-rank now">
           {refreshing ? "Ranking…" : "Re-rank"}
+        </button>
+        <AlertsBell refreshKey={alertsKey} onSelect={onAlertSelect} />
+        <button
+          onClick={onOpenModels}
+          className="btn-secondary px-3 py-1.5 text-xs max-w-[11rem] truncate"
+          title={status?.models ? `Chat: ${status.models.chat?.name} (${status.models.chat?.model})\nBackground: ${status.models.background?.name} (${status.models.background?.model})` : "AI model settings"}
+        >
+          AI: {status?.models?.chat?.name ?? "models"}
         </button>
         <button onClick={onOpenLearning} className="btn-secondary px-3 py-1.5 text-xs" title="Upload Zerodha trades, strategy performance, risk settings">
           Learning

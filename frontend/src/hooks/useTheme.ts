@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 
 export type Theme = "dark" | "light";
 
-const STORAGE_KEY = "tradeai.theme";
+const STORAGE_KEY = "aitrading.theme";
 
 function readTheme(): Theme {
   try {

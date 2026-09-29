@@ -34,3 +34,9 @@ dist/
 .DS_Store
 Thumbs.db
 
+# Secrets (API keys live in Windows Credential Manager, never in files)
+*.pem
+*.key
+secrets/
+credentials*.json
+*.secret

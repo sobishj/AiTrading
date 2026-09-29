@@ -1,5 +1,5 @@
--- TradeAI PostgreSQL schema
--- Run against an empty database: psql -U tradeai -d tradeai -f config/database.sql
+-- AiTrading PostgreSQL schema
+-- Run against an empty database: psql -U aitrading -d aitrading -f config/database.sql
 
 CREATE EXTENSION IF NOT EXISTS vector;
 

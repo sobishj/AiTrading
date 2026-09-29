@@ -115,6 +115,12 @@ class TechnicalSnapshot:
     relative_strength_20d: Optional[float] = None
     swing_low_10: Optional[float] = None
     last_bar_time: Optional[str] = None
+    # --- added for the multi-model research context (all derived from the same daily bars) ---
+    sma_20: Optional[float] = None
+    sma_50: Optional[float] = None
+    vwap_20: Optional[float] = None       # 20-day VWAP from daily bars (typical price x volume), not intraday VWAP
+    breakout: bool = False                # close above the prior 20-day high on >= 1.3x volume
+    breakdown: bool = False               # close below the prior 20-day low on >= 1.3x volume
     setups: list[str] = field(default_factory=list)
     trend: str = "unknown"
     score_breakdown: dict = field(default_factory=dict)
@@ -209,6 +215,11 @@ class AnalysisService:
         df["ema_50"] = EMAIndicator(close=close, window=50).ema_indicator()
         df["ema_200"] = (EMAIndicator(close=close, window=200).ema_indicator()
                          if len(df) >= 200 else np.nan)
+        df["sma_20"] = close.rolling(20, min_periods=20).mean()
+        df["sma_50"] = close.rolling(50, min_periods=50).mean()
+        typical = (high + low + close) / 3
+        vol20 = df["volume"].rolling(20, min_periods=10).sum()
+        df["vwap_20"] = (typical * df["volume"]).rolling(20, min_periods=10).sum() / vol20.replace(0, np.nan)
         df["atr"] = (AverageTrueRange(high=high, low=low, close=close, window=14).average_true_range()
                      if len(df) >= 15 else np.nan)
         # ta fills the warm-up period with zeros rather than NaN.
@@ -318,7 +329,14 @@ class AnalysisService:
             swing_low_10=_f(last["swing_low_10"]),
             last_bar_time=bar_time.isoformat() if bar_time is not None else None,
             setups=setups,
+            sma_20=_f(last["sma_20"]),
+            sma_50=_f(last["sma_50"]),
+            vwap_20=_f(last["vwap_20"]),
         )
+        prior_high, prior_low = _f(last["prior_high_20"]), _f(last["prior_low_20"])
+        heavy = bool(volume_ratio is not None and volume_ratio >= 1.3)
+        snap.breakout = bool(prior_high is not None and close > prior_high and heavy)
+        snap.breakdown = bool(prior_low is not None and close < prior_low and heavy)
         snap.trend = self._trend(snap)
         self._score(snap, prev_hist=_f(prev["macd_hist"]))
         snap.backtest = self.backtest_setups(df, flags)

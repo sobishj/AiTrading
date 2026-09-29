@@ -1,5 +1,5 @@
 <#
-  Stop the TradeAI backend and frontend started by start-tradeai.ps1, and close
+  Stop the AiTrading backend and frontend started by start-aitrading.ps1, and close
   their console windows. Docker (database) and Bionic are left running.
 #>
 function Get-ConsoleRoot([int]$ProcessId) {
@@ -26,15 +26,15 @@ function Stop-Server([int]$Port, [string]$Name) {
     return $true
 }
 
-# Only stop a backend port that is actually TradeAI (8000 may belong to another program).
+# Only stop a backend port that is actually AiTrading (8000 may belong to another program).
 $backendStopped = $false
 foreach ($port in 8000, 8010) {
     try {
         $health = Invoke-RestMethod -Uri "http://localhost:$port/health" -TimeoutSec 3
-        if ($health.app -eq "TradeAI") { $backendStopped = (Stop-Server $port "TradeAI backend") -or $backendStopped }
+        if ($health.app -eq "AiTrading") { $backendStopped = (Stop-Server $port "AiTrading backend") -or $backendStopped }
     } catch { }
 }
 if (-not $backendStopped) { Write-Host "Backend was not running." }
-if (-not (Stop-Server 5173 "TradeAI frontend")) { Write-Host "Frontend was not running." }
+if (-not (Stop-Server 5173 "AiTrading frontend")) { Write-Host "Frontend was not running." }
 
-Write-Host "TradeAI stopped. Learning is paused until you start it again."
+Write-Host "AiTrading stopped. Learning is paused until you start it again."

@@ -5,6 +5,7 @@ from datetime import date, datetime
 
 from pgvector.sqlalchemy import Vector
 from sqlalchemy import (
+    UniqueConstraint,
     BigInteger, Boolean, Date, DateTime, ForeignKey, Integer, Numeric, String, Text, or_,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -37,8 +38,10 @@ class Stock(Base):
 
 
 def tracked_stock_filter():
-    """Stocks the engine ranks and watches: the Auto universe plus the user's Manual list."""
-    return or_(Stock.watchlist_status == "active", Stock.in_manual_list.is_(True))
+    """Stocks the engine ranks and watches: the Auto universe, the Manual list, and open holdings."""
+    from sqlalchemy import select  # local: Position is defined further down this module
+    held = select(Position.stock_id).where(Position.status == "open")
+    return or_(Stock.watchlist_status == "active", Stock.in_manual_list.is_(True), Stock.id.in_(held))
 
 
 class Recommendation(Base):
@@ -166,6 +169,14 @@ class AppSettings(Base):
     risk_per_trade_pct: Mapped[float | None] = mapped_column(Numeric, nullable=True)
     # AI analyst practice on historical charts while the market is closed.
     ai_practice_enabled: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true", nullable=False)
+    # Which saved LLM profile serves chat/analyst notes vs. background work (news, forecasts, practice).
+    chat_profile_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    background_profile_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # Windows toast notifications for holding alerts (in addition to in-app/browser alerts).
+    desktop_notifications: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true", nullable=False)
+    # "single" = one model (the background model), exactly the original behaviour;
+    # "multi"  = every enabled model analyses independently, combined by the consensus engine.
+    analysis_mode: Mapped[str] = mapped_column(String(10), default="single", server_default="single", nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
@@ -231,6 +242,29 @@ class AIPrediction(Base):
     # "live" = a real forecast made today; "practice" = a historical chart replay
     # (prediction_date is then the hidden historical date, graded immediately).
     kind: Mapped[str] = mapped_column(String(10), default="live", server_default="live", nullable=False, index=True)
+    # primary = the forecast the app uses (single-model forecast or the daily consensus);
+    # member  = one model's answer inside a multi-model run; adhoc = on-demand consensus.
+    role: Mapped[str] = mapped_column(String(10), default="primary", server_default="primary", nullable=False, index=True)
+    profile_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    consensus_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    context_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    recommendation: Mapped[str | None] = mapped_column(String(10), nullable=True)        # BUY/HOLD/SELL/AVOID
+    confidence: Mapped[float | None] = mapped_column(Numeric, nullable=True)             # 0-100
+    entry: Mapped[float | None] = mapped_column(Numeric, nullable=True)
+    target: Mapped[float | None] = mapped_column(Numeric, nullable=True)
+    stop_loss: Mapped[float | None] = mapped_column(Numeric, nullable=True)
+    timeframe: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    analysis_json: Mapped[str | None] = mapped_column(Text, nullable=True)               # full structured answer
+    market_regime: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    latency_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # EvidenceEngine: share of the model's checkable claims the data supports (0-1; None = nothing checkable)
+    evidence_score: Mapped[float | None] = mapped_column(Numeric, nullable=True)
+    # Outcome from real bars over the horizon (None = not measurable / unknown)
+    max_favorable_pct: Mapped[float | None] = mapped_column(Numeric, nullable=True)
+    max_adverse_pct: Mapped[float | None] = mapped_column(Numeric, nullable=True)
+    target_hit: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    stop_hit: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    outcome_pnl_pct: Mapped[float | None] = mapped_column(Numeric, nullable=True)
     expected_move_pct: Mapped[float | None] = mapped_column(Numeric, nullable=True)
     reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     price_at_prediction: Mapped[float] = mapped_column(Numeric, nullable=False)
@@ -274,6 +308,7 @@ class AIMarketOutlook(Base):
     summary: Mapped[str | None] = mapped_column(Text, nullable=True)
     sector_impacts_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     headlines_considered: Mapped[int] = mapped_column(Integer, default=0)
+    role: Mapped[str] = mapped_column(String(10), default="primary", server_default="primary", nullable=False)
     lessons_version: Mapped[int] = mapped_column(Integer, default=0)
     model: Mapped[str | None] = mapped_column(String(100), nullable=True)
     prompt_text: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -282,3 +317,198 @@ class AIMarketOutlook(Base):
     actual_return_pct: Mapped[float | None] = mapped_column(Numeric, nullable=True)
     correct: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     graded_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
+# ---------------------------------------------------------------------------
+# Switchable LLM providers (llm_providers.py / llm_service.py)
+# ---------------------------------------------------------------------------
+class LLMProfile(Base):
+    """A saved model connection: local (Bionic/LM Studio/Ollama) or a cloud API (Claude, Kimi, ...)."""
+    __tablename__ = "llm_profiles"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String(100), nullable=False)
+    kind: Mapped[str] = mapped_column(String(30), nullable=False)          # openai_compatible | anthropic
+    base_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Stored in the local database only; the API never returns it unmasked. "env:NAME" reads an env var.
+    api_key: Mapped[str | None] = mapped_column(Text, nullable=True)
+    model: Mapped[str] = mapped_column(String(200), nullable=False)
+    daily_limit: Mapped[int] = mapped_column(Integer, default=0)            # requests/day; 0 = unlimited
+    allow_practice: Mapped[bool] = mapped_column(Boolean, default=False)    # may run chart practice (many calls)
+    usage_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    usage_count: Mapped[int] = mapped_column(Integer, default=0)
+    # Multi-model analysis (ai_orchestrator): profiles with enabled=True take part.
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true", nullable=False)
+    priority: Mapped[int] = mapped_column(Integer, default=100, server_default="100")   # lower runs/ranks first
+    temperature: Mapped[float | None] = mapped_column(Numeric, nullable=True)            # None = provider default
+    max_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    timeout_s: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    hourly_limit: Mapped[int] = mapped_column(Integer, default=0, server_default="0")    # 0 = no hourly cap
+    # Optional prices (USD per 1M tokens) for the usage/cost estimate.
+    input_price: Mapped[float | None] = mapped_column(Numeric, nullable=True)
+    output_price: Mapped[float | None] = mapped_column(Numeric, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    @property
+    def is_local(self) -> bool:
+        url = (self.base_url or "").lower()
+        return self.kind != "anthropic" and ("localhost" in url or "127.0.0.1" in url)
+
+
+# ---------------------------------------------------------------------------
+# Holdings monitoring (position_service.py)
+# ---------------------------------------------------------------------------
+class Position(Base):
+    """Shares the user actually holds, monitored continuously for loss risk, stop-loss and target."""
+    __tablename__ = "positions"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    stock_id: Mapped[int] = mapped_column(ForeignKey("stocks.id"), nullable=False, index=True)
+    status: Mapped[str] = mapped_column(String(10), default="open", index=True)      # open | closed
+    quantity: Mapped[float] = mapped_column(Numeric, nullable=False)                 # currently held
+    avg_price: Mapped[float] = mapped_column(Numeric, nullable=False)                # average cost of held shares
+    opened_on: Mapped[date] = mapped_column(Date, nullable=False)
+    stop_loss: Mapped[float | None] = mapped_column(Numeric, nullable=True)
+    target: Mapped[float | None] = mapped_column(Numeric, nullable=True)
+    notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    recommendation_id: Mapped[int | None] = mapped_column(ForeignKey("recommendations.id"), nullable=True)
+    realized_pnl: Mapped[float] = mapped_column(Numeric, default=0)
+    # Latest monitoring snapshot
+    last_price: Mapped[float | None] = mapped_column(Numeric, nullable=True)
+    loss_risk: Mapped[float | None] = mapped_column(Numeric, nullable=True)          # 0-100
+    risk_reasons: Mapped[str | None] = mapped_column(Text, nullable=True)            # JSON list
+    suggestion_json: Mapped[str | None] = mapped_column(Text, nullable=True)         # latest AI suggestion (JSON)
+    last_checked_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    closed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+    stock: Mapped["Stock"] = relationship()
+    transactions: Mapped[list["PositionTransaction"]] = relationship(
+        back_populates="position", cascade="all, delete-orphan", order_by="PositionTransaction.id")
+    alerts: Mapped[list["PositionAlert"]] = relationship(back_populates="position", cascade="all, delete-orphan")
+
+
+class PositionTransaction(Base):
+    __tablename__ = "position_transactions"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    position_id: Mapped[int] = mapped_column(ForeignKey("positions.id", ondelete="CASCADE"), nullable=False, index=True)
+    side: Mapped[str] = mapped_column(String(4), nullable=False)          # BUY | SELL
+    quantity: Mapped[float] = mapped_column(Numeric, nullable=False)
+    price: Mapped[float] = mapped_column(Numeric, nullable=False)
+    trade_date: Mapped[date] = mapped_column(Date, nullable=False)
+    realized_pnl: Mapped[float | None] = mapped_column(Numeric, nullable=True)   # SELLs: (price - avg cost) x qty
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    position: Mapped["Position"] = relationship(back_populates="transactions")
+
+
+class PositionAlert(Base):
+    """An alert raised while monitoring a holding; risk warnings are graded later to learn their reliability."""
+    __tablename__ = "position_alerts"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    position_id: Mapped[int] = mapped_column(ForeignKey("positions.id", ondelete="CASCADE"), nullable=False, index=True)
+    kind: Mapped[str] = mapped_column(String(20), nullable=False, index=True)
+    severity: Mapped[str] = mapped_column(String(10), nullable=False)     # info | warning | critical
+    title: Mapped[str] = mapped_column(String(200), nullable=False)
+    message: Mapped[str] = mapped_column(Text, nullable=False)
+    price: Mapped[float] = mapped_column(Numeric, nullable=False)
+    loss_risk: Mapped[float | None] = mapped_column(Numeric, nullable=True)
+    acknowledged: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
+    # Grading (risk warnings only): did the price actually fall afterwards?
+    outcome_return_pct: Mapped[float | None] = mapped_column(Numeric, nullable=True)
+    correct: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    graded_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+    position: Mapped["Position"] = relationship(back_populates="alerts")
+
+
+# ---------------------------------------------------------------------------
+# Multi-model research (research_context.py, ai_orchestrator.py, consensus_engine.py)
+# ---------------------------------------------------------------------------
+class ResearchContext(Base):
+    """The exact, timestamped research package every model was given (so analyses are comparable and auditable)."""
+    __tablename__ = "research_contexts"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    stock_id: Mapped[int | None] = mapped_column(ForeignKey("stocks.id"), nullable=True, index=True)
+    content_hash: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    context_json: Mapped[str] = mapped_column(Text, nullable=False)
+    prompt_text: Mapped[str] = mapped_column(Text, nullable=False)
+    data_timestamp: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
+
+
+class AIConsensus(Base):
+    """One multi-model run: every model's vote, the transparent agreement scores, and the combined view."""
+    __tablename__ = "ai_consensus"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    stock_id: Mapped[int] = mapped_column(ForeignKey("stocks.id"), nullable=False, index=True)
+    context_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    trigger: Mapped[str] = mapped_column(String(20), default="on_demand")      # daily | on_demand
+    signal: Mapped[str] = mapped_column(String(10), nullable=False)            # BUY / HOLD / SELL
+    probability_up: Mapped[float] = mapped_column(Numeric, nullable=False)
+    confidence: Mapped[float] = mapped_column(Numeric, nullable=False)          # 0-100
+    votes_json: Mapped[str] = mapped_column(Text, nullable=False)
+    scores_json: Mapped[str] = mapped_column(Text, nullable=False)
+    levels_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    reasoning_json: Mapped[str] = mapped_column(Text, nullable=False)
+    disagreement_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    models_used: Mapped[int] = mapped_column(Integer, default=0)
+    models_failed_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    market_regime: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
+
+    stock: Mapped["Stock"] = relationship()
+
+
+class LLMUsage(Base):
+    """Requests and tokens per model per hour — for hourly caps and the cost estimate."""
+    __tablename__ = "llm_usage"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    profile_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    hour: Mapped[datetime] = mapped_column(DateTime, nullable=False, index=True)   # UTC, truncated to the hour
+    requests: Mapped[int] = mapped_column(Integer, default=0)
+    failures: Mapped[int] = mapped_column(Integer, default=0)
+    input_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    output_tokens: Mapped[int] = mapped_column(Integer, default=0)
+
+
+class ModelPreset(Base):
+    """A saved model configuration (which models are enabled, mode, chat/background choice)."""
+    __tablename__ = "model_presets"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String(100), nullable=False, unique=True)
+    config_json: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class PatternStat(Base):
+    """
+    Evidence-backed knowledge: how often a verified factor (or combination) was followed by the
+    move it implies, counted only from graded real outcomes — never from what a model said.
+    """
+    __tablename__ = "pattern_stats"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    pattern: Mapped[str] = mapped_column(String(200), nullable=False)          # e.g. "breakout+volume_high"
+    bias: Mapped[str] = mapped_column(String(10), nullable=False)              # bullish | bearish
+    regime: Mapped[str] = mapped_column(String(40), default="ALL", nullable=False)
+    timeframe: Mapped[str] = mapped_column(String(20), default="5d", nullable=False)
+    # history = measured on past daily bars of the tracked stocks; live = from graded live analyses
+    source: Mapped[str] = mapped_column(String(10), default="live", nullable=False)
+    occurrences: Mapped[int] = mapped_column(Integer, default=0)
+    successes: Mapped[int] = mapped_column(Integer, default=0)
+    failures: Mapped[int] = mapped_column(Integer, default=0)
+    total_return_pct: Mapped[float] = mapped_column(Numeric, default=0)
+    source_models: Mapped[str | None] = mapped_column(Text, nullable=True)      # comma list of models that cited it
+    first_observed: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    last_observed: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    __table_args__ = (UniqueConstraint("pattern", "bias", "regime", "timeframe", "source", name="uq_pattern_stat"),)

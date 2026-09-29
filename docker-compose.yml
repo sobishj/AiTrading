@@ -1,23 +1,26 @@
+# Fixed project name so container/volume names never depend on the folder name.
+name: aitrading
+
 services:
   postgres:
     image: pgvector/pgvector:pg17
-    container_name: tradeai-pg
+    container_name: aitrading-pg
     restart: unless-stopped
 
     environment:
-      POSTGRES_DB: tradeai
-      POSTGRES_USER: tradeai
-      POSTGRES_PASSWORD: tradeai
+      POSTGRES_DB: aitrading
+      POSTGRES_USER: aitrading
+      POSTGRES_PASSWORD: aitrading
 
     ports:
       - "5433:5432"
 
     volumes:
-      - tradeai_pgdata:/var/lib/postgresql/data
+      - aitrading_pgdata:/var/lib/postgresql/data
 
   pgadmin:
     image: dpage/pgadmin4:latest
-    container_name: tradeai-pgadmin
+    container_name: aitrading-pgadmin
     restart: unless-stopped
 
     environment:
@@ -31,8 +34,8 @@ services:
       - postgres
 
     volumes:
-      - tradeai_pgadmin_data:/var/lib/pgadmin
+      - aitrading_pgadmin_data:/var/lib/pgadmin
 
 volumes:
-  tradeai_pgdata:
-  tradeai_pgadmin_data:
+  aitrading_pgdata:
+  aitrading_pgadmin_data:

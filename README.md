@@ -1,4 +1,4 @@
-# TradeAI
+# AiTrading
 
 AI-powered NSE market analyst. Continuously ranks a watchlist of NSE stocks by
 conviction, detects the setup behind each one (breakout, pullback, momentum,
@@ -19,10 +19,10 @@ See `ARCHITECTURE.md` for how it works, `TASKS.md` for status, and
 
 ## Quick start (Windows)
 
-Double-click **`start-tradeai.bat`** in the project folder. It starts Docker/PostgreSQL,
+Double-click **`start-aitrading.bat`** in the project folder. It starts Docker/PostgreSQL,
 Bionic (if installed), the backend (port 8000, or 8010 if 8000 is taken) and the
 frontend, then opens <http://localhost:5173> in Chrome. Running it again is safe —
-anything already running is left alone. **`stop-tradeai.bat`** stops the backend and
+anything already running is left alone. **`stop-aitrading.bat`** stops the backend and
 frontend (Docker and Bionic keep running). The sections below cover first-time setup.
 
 ---
@@ -48,8 +48,8 @@ frontend (Docker and Bionic keep running). The sections below cover first-time s
 ### Quickest: Docker
 
 `docker compose up -d` from the repo root starts PostgreSQL 17 + pgvector on
-port **5433** (user/password/db `tradeai`) plus pgAdmin on 5050. Point
-`DATABASE_URL` at `postgresql://tradeai:tradeai@localhost:5433/tradeai` and skip
+port **5433** (user/password/db `aitrading`) plus pgAdmin on 5050. Point
+`DATABASE_URL` at `postgresql://aitrading:aitrading@localhost:5433/aitrading` and skip
 the rest of this section. The backend creates and migrates tables on startup.
 
 ### Install pgvector (native PostgreSQL)
@@ -79,14 +79,14 @@ psql -U postgres -c "SELECT * FROM pg_available_extensions WHERE name = 'vector'
 psql -U postgres
 ```
 ```sql
-CREATE ROLE tradeai WITH LOGIN PASSWORD 'tradeai';
-CREATE DATABASE tradeai OWNER tradeai;
+CREATE ROLE aitrading WITH LOGIN PASSWORD 'aitrading';
+CREATE DATABASE aitrading OWNER aitrading;
 ```
 
 ### Apply the schema
 
 ```bash
-psql -U tradeai -d tradeai -f config/database.sql
+psql -U aitrading -d aitrading -f config/database.sql
 ```
 
 This creates every table, enables the `vector` extension, and builds the
@@ -112,7 +112,7 @@ created above. Key settings:
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `DATABASE_URL` | `postgresql://tradeai:tradeai@localhost:5432/tradeai` | Postgres connection |
+| `DATABASE_URL` | `postgresql://aitrading:aitrading@localhost:5432/aitrading` | Postgres connection |
 | `LLM_BASE_URL` | `http://localhost:1234/v1` | Bionic OpenAI-compatible endpoint |
 | `LLM_MODEL` | `qwen2.5-1.5b-instruct` | Chat model id |
 | `LLM_EMBEDDING_MODEL` | `text-embedding-nomic-embed-text-v1.5` | Embedding model id |
@@ -152,7 +152,7 @@ swing-trade horizon the engine targets. Set `MARKET_DATA_PROVIDER=kite` or `yaho
 to force one source.
 
 Kite Connect is **optional**. With it you get broker data and **Prepare order**
-(Kite Publisher): TradeAI builds a LIMIT order basket and Zerodha's own
+(Kite Publisher): AiTrading builds a LIMIT order basket and Zerodha's own
 window opens for you to review and confirm.
 
 1. Create an app at <https://developers.kite.trade/apps> (₹2000/month subscription).
@@ -161,7 +161,7 @@ window opens for you to review and confirm.
 4. Access tokens expire daily. Open <http://localhost:8000/kite/login> once per
    trading day; the callback stores the session in memory.
 
-**TradeAI never places orders.** Every order is confirmed by you on Zerodha.
+**AiTrading never places orders.** Every order is confirmed by you on Zerodha.
 
 ---
 
@@ -203,8 +203,8 @@ If the server isn't running at those times, `python backend/scripts/nightly_dige
 does the learning + brief in one go (e.g. via Task Scheduler at 08:15):
 
 ```powershell
-schtasks /create /tn "TradeAI Digest" ^
-  /tr "C:\VSCode\TradeAI\backend\venv\Scripts\python.exe C:\VSCode\TradeAI\backend\scripts\nightly_digest.py" ^
+schtasks /create /tn "AiTrading Digest" ^
+  /tr "C:\VSCode\AiTrading\backend\venv\Scripts\python.exe C:\VSCode\AiTrading\backend\scripts\nightly_digest.py" ^
   /sc weekly /d MON,TUE,WED,THU,FRI /st 08:15
 ```
 
@@ -212,7 +212,7 @@ schtasks /create /tn "TradeAI Digest" ^
 
 Top bar → **Learning** → choose the tradebook (Console → Reports → Tradebook,
 CSV or XLSX). Executions are FIFO-matched into round trips (P&L × quantity),
-de-duplicated by trade ID (so re-uploading is safe), and linked to the TradeAI
+de-duplicated by trade ID (so re-uploading is safe), and linked to the AiTrading
 recommendation issued in the 10 days before each entry. A learning cycle runs right
 after the import.
 
@@ -276,10 +276,39 @@ None of this is a substitute for your own judgment.
 
 ---
 
+## Holdings & alerts
+
+Record shares you buy (Trade Plan -> **I bought this**, or the **Holdings** tab). The AI watches them every
+minute during market hours and alerts you — in the app (🔔), as a browser notification and as a Windows
+notification — when a holding nears or hits your stop-loss, reaches your target, is up enough to move
+your stop, or when its risk of loss rises (with the reasons). Record sales with **Record sale**; every
+sale feeds the learning engine with real quantity and P&L.
+
+## Choosing AI models
+
+Top bar -> **AI: …** opens the model settings. Add local models (Bionic, LM Studio, Ollama) or APIs
+(Claude, Kimi, OpenAI, OpenRouter, Gemini, any OpenAI-compatible endpoint), **Fetch models** to pick
+one, **Test** it, and choose which model handles **chat** and which handles the 24/7 **background**
+work. Paid APIs get a daily request cap, and chart practice runs only on models you allow.
+Delete models you no longer need from the same list. API keys are saved in Windows Credential
+Manager, never in the database or browser.
+
+### Several models at once (evidence-checked)
+
+In the same window choose **Single model** (default — works exactly as before) or **Multi-model**,
+tick which models take part, or apply a preset (Local only, Cloud + Local, All models, Low cost — or
+save your own). In the Analysis panel, **Run AI analysis** (optionally "Use all enabled models") has
+each model analyse the same timestamped data. Every claim a model makes is checked against the real
+data — a model that invents news or misreads an indicator loses weight — and the result is weighted
+by each model's measured accuracy in similar markets, not by counting votes. Disagreement is always
+shown; expand **Individual AI analysis** to see each model's reasoning and which claims held up.
+Everything is graded against real prices after 5 trading days (Learning → model performance). This
+gives probabilities, not guarantees; you still place every order yourself.
+
 ## Architecture
 
 ```
-TradeAI/
+AiTrading/
 ├── backend/
 │   ├── main.py              FastAPI app, Kite OAuth, background engine (ranking, news trigger, scheduler)
 │   ├── config.py            pydantic-settings configuration
@@ -366,7 +395,7 @@ AVOID** and an ATR-based plan (stop ≤ 1.5 ATR, 2R target).
 
 ## Troubleshooting
 
-**`password authentication failed for user "tradeai"`**
+**`password authentication failed for user "aitrading"`**
 The role doesn't exist yet or the password differs. See step 1.
 
 **`extension "vector" is not available`**
@@ -378,7 +407,7 @@ and confirm `LLM_MODEL` matches an id from that response.
 
 **Charts are empty / "No candle data"**
 Yahoo Finance may be unreachable from your network, or the symbol isn't listed on
-NSE. Check `backend/logs/tradeai.log` for `Yahoo chart ... returned HTTP`.
+NSE. Check `backend/logs/aitrading.log` for `Yahoo chart ... returned HTTP`.
 
 **Running the tests**
 `cd backend && venv\Scripts\python -m pip install -r requirements-dev.txt && venv\Scripts\python -m pytest -q`,

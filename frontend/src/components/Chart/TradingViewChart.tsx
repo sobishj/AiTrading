@@ -24,7 +24,7 @@ const TOGGLE_LABELS: { key: keyof IndicatorToggles; label: string }[] = [
 ];
 
 function storageKey(symbol: string, timeframe: Timeframe) {
-  return `tradeai.drawings.${symbol}.${timeframe}`;
+  return `aitrading.drawings.${symbol}.${timeframe}`;
 }
 
 function loadDrawings(symbol: string, timeframe: Timeframe): Drawing[] {

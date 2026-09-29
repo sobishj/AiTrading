@@ -704,7 +704,8 @@ class RankingService:
         by_rec: dict[int, tuple] = {}
         for trade, rec in rows:
             current = by_rec.get(rec.id)
-            if current is None or (trade.source == "zerodha" and current[0].source != "zerodha"):
+            if current is None or (trade.source in ("zerodha", "manual")
+                                   and current[0].source not in ("zerodha", "manual")):
                 by_rec[rec.id] = (trade, rec)
         pairs = list(by_rec.values())[:200]
 

@@ -5,7 +5,7 @@ Keeping prompts here (rather than inline in service code) makes them easy to
 iterate on and lets us inject few-shot examples pulled from trade history.
 """
 
-CHAT_SYSTEM_PROMPT = """You are TradeAI, an expert NSE (National Stock Exchange of India) market analyst and trading coach. You speak concisely and precisely, like a seasoned trading desk analyst. You always:
+CHAT_SYSTEM_PROMPT = """You are AiTrading, an expert NSE (National Stock Exchange of India) market analyst and trading coach. You speak concisely and precisely, like a seasoned trading desk analyst. You always:
 - Ground your answers in the live context provided (rankings, trade plans, indicators, news); never invent prices, levels or news.
 - State the entry, stop-loss, target, risk level and holding period whenever you discuss a trade idea.
 - Explain rankings using the score drivers given (trend, momentum, structure, volume, relative strength, news).
@@ -19,13 +19,13 @@ different one, and never swap in another stock's prices or levels.
 """
 
 CHAT_FOCUS_PROMPT = """FOCUS: the user is asking about {name} ({symbol}). Use the "Focus stock" facts \
-in the live context for any question about "this share" / "it", and start from TradeAI's call on it. \
+in the live context for any question about "this share" / "it", and start from AiTrading's call on it. \
 Quote numbers ONLY from those facts — never reuse numbers from earlier answers, which may be about other \
 stocks. The ranking list is background only."""
 
 CHAT_TURN_TAG = "[Viewing: {label}] "
 
-STOCK_ANALYSIS_PROMPT = """You are explaining why TradeAI ranked {symbol} ({name}, {sector}) the way it did. Use ONLY the facts below.
+STOCK_ANALYSIS_PROMPT = """You are explaining why AiTrading ranked {symbol} ({name}, {sector}) the way it did. Use ONLY the facts below.
 
 Current call: {action} via {strategy} setup, conviction {conviction}/100, rank #{rank}.
 
@@ -117,12 +117,12 @@ Answer with exactly one line per headline, in this format and nothing else:
 <number> | <impact> | <reason in at most 12 words>
 """
 
-AI_PREDICTION_PROMPT = """You are TradeAI's analyst, forecasting {name} ({symbol}) on NSE over the next \
+AI_PREDICTION_PROMPT = """You are AiTrading's analyst, forecasting {name} ({symbol}) on NSE over the next \
 {horizon} trading days. Use only these facts.
 
 Market: {market}
 Stock facts: {facts}
-TradeAI's rule-based call: {call}
+AiTrading's rule-based call: {call}
 News (your earlier reads): {news}
 Your past forecasts on this stock and how they turned out: {own_history}
 Your overall track record: {track_record}
@@ -137,7 +137,37 @@ EXPECTED_MOVE: expected % change over {horizon} days, e.g. 2.5 or -1.8
 REASON: one sentence
 """
 
-AI_REFLECTION_PROMPT = """You are TradeAI's analyst reviewing your own recent forecasts to get better.
+# Multi-model analysis: every model gets this same prompt built from one ResearchContext
+# (research_context.py), and answers in the same line format (parsed by ai_orchestrator.parse_structured).
+STRUCTURED_ANALYSIS_PROMPT = """You are one of several independent analysts reviewing {name} ({symbol}) on NSE for a swing trade over the next {horizon} trading days. Work only from the research package below — it was collected at {collected_at} from {data_source}. Do not invent prices, news or indicator values. Nothing here is guaranteed; give probabilities, not certainties.
+
+{context}
+
+KNOWLEDGE (graded past analyses are opinions labelled with their source model and what actually happened; factor statistics are measured outcomes — neither overrides the data above):
+{knowledge}
+
+Reply with exactly these lines and nothing else:
+RECOMMENDATION: BUY or HOLD or SELL or AVOID
+DIRECTION: up or down or flat
+CONFIDENCE: whole number 0-100 (how sure you are of your recommendation)
+PROBABILITY_UP: whole number 0-100 (probability the price is higher after {horizon} days; below 20 or above 80 needs exceptional evidence)
+EXPECTED_MOVE: expected % change over {horizon} days, e.g. 2.5 or -1.8
+ENTRY: price or range, e.g. 1510-1522, or NONE
+TARGET: price or NONE
+STOP_LOSS: price or NONE
+TIMEFRAME: e.g. 3-5 days
+TECHNICAL: one sentence on the chart
+NEWS: one sentence on the news (say "no material news" if none)
+RISKS: up to three short risks separated by ;
+REASONING: two sentences at most
+Then 2 to 6 CLAIM lines — the evidence for your call, each checked by AiTrading against the data:
+CLAIM: key | the evidence in the data | your confidence 0-100
+Use only these keys: {claim_keys}
+For news claims write the headline id after the key, e.g. CLAIM: positive_news:N2 | order win reported | 60
+Only cite news that appears in the NEWS list above.
+"""
+
+AI_REFLECTION_PROMPT = """You are AiTrading's analyst reviewing your own recent forecasts to get better.
 
 Your current lessons:
 {current_lessons}
@@ -156,7 +186,7 @@ Answer with a numbered list only:
 1. ...
 """
 
-MARKET_OUTLOOK_PROMPT = """You are TradeAI's market strategist. The next NSE trading session is {session_date}. Using ONLY the facts below, forecast how the NIFTY 50 will close in that session versus its last close, and which sectors the news is likely to move.
+MARKET_OUTLOOK_PROMPT = """You are AiTrading's market strategist. The next NSE trading session is {session_date}. Using ONLY the facts below, forecast how the NIFTY 50 will close in that session versus its last close, and which sectors the news is likely to move.
 
 Last session: {last_session}
 Global markets now: {global_markets}
@@ -238,6 +268,10 @@ class PromptLibrary:
     @staticmethod
     def ai_prediction(**kwargs) -> str:
         return AI_PREDICTION_PROMPT.format(**kwargs)
+
+    @staticmethod
+    def structured_analysis(**kwargs) -> str:
+        return STRUCTURED_ANALYSIS_PROMPT.format(**kwargs)
 
     @staticmethod
     def ai_reflection(**kwargs) -> str:

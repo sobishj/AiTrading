@@ -1,5 +1,18 @@
 import axios, { AxiosInstance } from "axios";
 import type {
+  HoldingsLearning,
+  Consensus,
+  LLMPreset,
+  ModelPerformance,
+  ModelPresets,
+  ModelUsage,
+  PatternRow,
+  LLMProfile,
+  LLMProfileInput,
+  LLMProfilesResponse,
+  Position,
+  PositionAlert,
+  ProviderKind,
   AIPerformance,
   MarketOutlook,
   AIPredictionRow,
@@ -219,6 +232,166 @@ class ApiService {
   async queueAIReflection(): Promise<{ graded: number }> {
     const { data } = await this.client.post<{ status: string; graded: number }>("/ai/reflect", undefined, { timeout: 120000 });
     return data;
+  }
+
+  // ---------------------------------------------------------------- holdings
+  async getPositions(status: "open" | "closed" | "all" = "open"): Promise<Position[]> {
+    const { data } = await this.client.get<Position[]>("/positions", { params: { status } });
+    return data;
+  }
+
+  async getPositionForSymbol(symbol: string): Promise<Position | null> {
+    const { data } = await this.client.get<Position | null>(`/positions/by-symbol/${ApiService.enc(symbol)}`);
+    return data;
+  }
+
+  async buyShares(input: {
+    symbol: string; quantity: number; price?: number | null; trade_date?: string | null;
+    stop_loss?: number | null; target?: number | null; notes?: string | null;
+  }): Promise<Position> {
+    const { data } = await this.client.post<Position>("/positions", input, { timeout: 60000 });
+    return data;
+  }
+
+  async sellShares(positionId: number, input: { quantity: number; price: number; trade_date?: string | null }): Promise<Position> {
+    const { data } = await this.client.post<Position>(`/positions/${positionId}/sell`, input);
+    return data;
+  }
+
+  async updatePosition(positionId: number, input: { stop_loss?: number | null; target?: number | null; notes?: string | null }): Promise<Position> {
+    const { data } = await this.client.patch<Position>(`/positions/${positionId}`, input);
+    return data;
+  }
+
+  async getPosition(positionId: number): Promise<Position> {
+    const { data } = await this.client.get<Position>(`/positions/${positionId}`);
+    return data;
+  }
+
+  async editTransaction(positionId: number, txId: number, input: { quantity: number; price: number; trade_date: string }): Promise<Position> {
+    const { data } = await this.client.patch<Position>(`/positions/${positionId}/transactions/${txId}`, input, { timeout: 60000 });
+    return data;
+  }
+
+  /** Returns null when deleting the last buy removed the whole holding. */
+  async deleteTransaction(positionId: number, txId: number): Promise<Position | null> {
+    const { data } = await this.client.delete<Position | null>(`/positions/${positionId}/transactions/${txId}`, { timeout: 60000 });
+    return data;
+  }
+
+  async deletePosition(positionId: number): Promise<void> {
+    await this.client.delete(`/positions/${positionId}`);
+  }
+
+  async getAlerts(limit = 30): Promise<{ unread: number; alerts: PositionAlert[] }> {
+    const { data } = await this.client.get<{ unread: number; alerts: PositionAlert[] }>("/alerts", { params: { limit } });
+    return data;
+  }
+
+  async acknowledgeAlerts(ids?: number[]): Promise<void> {
+    await this.client.post("/alerts/ack", { ids: ids ?? null });
+  }
+
+  async getHoldingsLearning(): Promise<HoldingsLearning> {
+    const { data } = await this.client.get<HoldingsLearning>("/positions/learning");
+    return data;
+  }
+
+  // ---------------------------------------------------------------- AI models
+  // ---- multi-model analysis ----
+  async runAIAnalysis(symbol: string, opts: { profile_ids?: number[]; use_all?: boolean; force?: boolean } = {}): Promise<Consensus> {
+    // Several models answer in parallel; a local model alone can take a few minutes.
+    const { data } = await this.client.post<Consensus>(`/ai/analyze/${encodeURIComponent(symbol)}`, opts, { timeout: 900000 });
+    return data;
+  }
+
+  async getConsensus(symbol: string): Promise<Consensus> {
+    const { data } = await this.client.get<Consensus>(`/ai/consensus/${encodeURIComponent(symbol)}`);
+    return data;
+  }
+
+  async getModelPerformance(): Promise<ModelPerformance[]> {
+    const { data } = await this.client.get<ModelPerformance[]>("/ai/models/performance");
+    return data;
+  }
+
+  async getPatterns(source?: "history" | "live"): Promise<PatternRow[]> {
+    const { data } = await this.client.get<PatternRow[]>("/ai/patterns", { params: source ? { source } : {} });
+    return data;
+  }
+
+  async getModelUsage(): Promise<ModelUsage[]> {
+    const { data } = await this.client.get<ModelUsage[]>("/ai/usage");
+    return data;
+  }
+
+  async getProviderStatus(): Promise<{ id: number; connected: boolean }[]> {
+    const { data } = await this.client.get<{ id: number; connected: boolean }[]>("/llm/status", { timeout: 30000 });
+    return data;
+  }
+
+  async setAnalysisMode(mode: "single" | "multi"): Promise<void> {
+    await this.client.put("/ai/mode", { mode });
+  }
+
+  async getModelPresets(): Promise<ModelPresets> {
+    const { data } = await this.client.get<ModelPresets>("/ai/presets");
+    return data;
+  }
+
+  async applyBuiltinPreset(key: string): Promise<void> {
+    await this.client.post(`/ai/presets/builtin/${key}/apply`);
+  }
+
+  async saveModelPreset(name: string): Promise<void> {
+    await this.client.post("/ai/presets", { name });
+  }
+
+  async applyModelPreset(id: number): Promise<void> {
+    await this.client.post(`/ai/presets/${id}/apply`);
+  }
+
+  async deleteModelPreset(id: number): Promise<void> {
+    await this.client.delete(`/ai/presets/${id}`);
+  }
+
+  async getLLMPresets(): Promise<LLMPreset[]> {
+    const { data } = await this.client.get<LLMPreset[]>("/llm/presets");
+    return data;
+  }
+
+  async getLLMProfiles(): Promise<LLMProfilesResponse> {
+    const { data } = await this.client.get<LLMProfilesResponse>("/llm/profiles", { timeout: 30000 });
+    return data;
+  }
+
+  async saveLLMProfile(input: LLMProfileInput, id?: number): Promise<LLMProfile> {
+    const { data } = id
+      ? await this.client.put<LLMProfile>(`/llm/profiles/${id}`, input)
+      : await this.client.post<LLMProfile>("/llm/profiles", input);
+    return data;
+  }
+
+  async deleteLLMProfile(id: number): Promise<void> {
+    await this.client.delete(`/llm/profiles/${id}`);
+  }
+
+  async setActiveModels(chatProfileId: number, backgroundProfileId: number): Promise<void> {
+    await this.client.put("/llm/active", { chat_profile_id: chatProfileId, background_profile_id: backgroundProfileId });
+  }
+
+  async listProviderModels(input: { kind: ProviderKind; base_url?: string | null; api_key?: string | null; profile_id?: number | null }): Promise<string[]> {
+    const { data } = await this.client.post<{ models: string[] }>("/llm/models", input, { timeout: 30000 });
+    return data.models;
+  }
+
+  async testProvider(input: { kind: ProviderKind; base_url?: string | null; api_key?: string | null; model: string; profile_id?: number | null }): Promise<{ ok: boolean; reply?: string; error?: string; seconds: number }> {
+    const { data } = await this.client.post("/llm/test", input, { timeout: 120000 });
+    return data;
+  }
+
+  async setDesktopNotifications(desktop: boolean): Promise<void> {
+    await this.client.put("/settings/notifications", { desktop });
   }
 
   aiTrainingDataUrl(): string {

@@ -19,12 +19,12 @@ class Settings(BaseSettings):
     )
 
     # ---- App ----
-    APP_NAME: str = "TradeAI"
+    APP_NAME: str = "AiTrading"
     APP_ENV: str = "development"
     SECRET_KEY: str = "change-this-in-production"
 
     # ---- Database ----
-    DATABASE_URL: str = "postgresql://tradeai:tradeai@localhost:5432/tradeai"
+    DATABASE_URL: str = "postgresql://aitrading:aitrading@localhost:5432/aitrading"
     DB_POOL_SIZE: int = 10
     DB_MAX_OVERFLOW: int = 20
     DB_ECHO: bool = False

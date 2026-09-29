@@ -1,143 +1,205 @@
 """
-Local LLM integration via Semantic Kernel, against any OpenAI-compatible
-server (LM Studio / Bionic) at LLM_BASE_URL — Qwen 2.5 or Qwen 3.
+LLM orchestration with switchable providers.
 
-All prompt text lives in prompts/prompt_library.py — this module is purely
-orchestration: kernel setup, availability probing, invocation, retries,
-fallbacks, and a single-worker background queue for non-interactive jobs.
+Two roles, each served by a saved LLM profile (llm_profiles table) that the
+user picks in the app:
+- "chat": the Trading Coach chat and on-demand analyst notes;
+- "background": news reads, forecasts, chart practice, outlooks, reflection,
+  recommendation commentary and the morning brief prose.
+So you can, for example, chat with Claude while a free local Qwen does the
+24/7 background work.
 
-Design note: the ranking engine never *depends* on the LLM. Scores, setups
-and trade plans are deterministic (analysis_service); the LLM adds narrative
-on top. When the model server is down, every method returns its fallback
-immediately instead of hanging through retries.
+Providers (llm_providers.py): any OpenAI-compatible server (Bionic, LM Studio,
+Ollama, Kimi, OpenAI, OpenRouter, Gemini) or Claude via the Anthropic SDK.
+Each profile can carry a daily request cap so a paid API can't run up a bill.
+
+All prompt text lives in prompts/prompt_library.py. The ranking engine never
+depends on the LLM: when a model is down or over its cap, every method returns
+its fallback immediately.
 """
 import asyncio
 import hashlib
-import re
 import time
+from dataclasses import dataclass
+from datetime import date, datetime, timedelta, timezone
 from typing import Awaitable, Callable, Optional
 
 from openai import AsyncOpenAI
-from semantic_kernel import Kernel
-from semantic_kernel.connectors.ai.open_ai import (
-    OpenAIChatCompletion,
-    OpenAIChatPromptExecutionSettings,
-)
-from semantic_kernel.contents.chat_history import ChatHistory
-from semantic_kernel.functions import KernelArguments
 
 from config import settings
+from llm_providers import (
+    PRESETS, ProviderConfig, ProviderError, build_provider, clean_output, resolve_key,
+)
 from prompts.prompt_library import PromptLibrary
-from utils.decorators import async_retry
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
 
 EMBEDDING_DIM = 1536
 _AVAILABILITY_TTL_SECONDS = 30
-_THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL | re.IGNORECASE)
+IST = timezone(timedelta(hours=5, minutes=30))
+ROLES = ("chat", "background")
+
+# Re-exported for callers/tests that import it from here.
+__all__ = ["llm_service", "clean_output", "LLMService"]
 
 
-def clean_output(text: str) -> str:
-    """Strip Qwen 3 style <think> reasoning blocks (and a dangling opener) from model output."""
-    text = _THINK_RE.sub("", text)
-    if "<think>" in text.lower():
-        text = text[: text.lower().index("<think>")]
-    return text.strip()
+@dataclass
+class ActiveProfile:
+    id: int
+    name: str
+    kind: str
+    model: str
+    base_url: Optional[str]
+    api_key: Optional[str]
+    daily_limit: int
+    allow_practice: bool
+    updated_at: datetime
 
 
 class LLMService:
-    """Wraps a Semantic Kernel chat-completion service pointed at the local LLM."""
-
     def __init__(self) -> None:
-        self._async_client = AsyncOpenAI(
-            base_url=settings.LLM_BASE_URL,
-            api_key=settings.LLM_API_KEY,
-            timeout=settings.LLM_TIMEOUT,
-        )
-
-        self.kernel = Kernel()
-        self.service_id = "local-qwen"
-        self.kernel.add_service(
-            OpenAIChatCompletion(
-                service_id=self.service_id,
-                ai_model_id=settings.LLM_MODEL,
-                async_client=self._async_client,
-            )
-        )
-        self._execution_settings = OpenAIChatPromptExecutionSettings(
-            service_id=self.service_id,
-            temperature=settings.LLM_TEMPERATURE,
-            max_tokens=700,
-        )
-        self._available: Optional[bool] = None
-        self._available_checked_at = 0.0
+        # Embeddings stay on the local OpenAI-compatible server (Claude has no embeddings API).
+        self._embed_client = AsyncOpenAI(base_url=settings.LLM_BASE_URL, api_key=settings.LLM_API_KEY,
+                                         timeout=settings.LLM_TIMEOUT)
+        self._active: dict[str, Optional[ActiveProfile]] = {role: None for role in ROLES}
+        self._providers: dict[tuple, object] = {}
+        self._availability: dict[int, tuple[bool, float]] = {}
+        self._cap_warned: set[tuple[int, date]] = set()
         self._queue: Optional[asyncio.Queue] = None
         self._worker: Optional[asyncio.Task] = None
         self._busy = False
         self.last_interactive_at = 0.0  # monotonic time of the last user chat (background work yields to it)
-        logger.info("LLMService initialized against %s (model=%s)", settings.LLM_BASE_URL, settings.LLM_MODEL)
 
     # ------------------------------------------------------------------
-    # Availability
+    # Profiles
     # ------------------------------------------------------------------
-    async def is_available(self) -> bool:
-        """Cheap cached probe of GET /models, so a stopped server costs ~2s once, not minutes per call."""
-        if self._available is not None and time.monotonic() - self._available_checked_at < _AVAILABILITY_TTL_SECONDS:
-            return self._available
+    def reload_profiles(self) -> None:
+        """(Re)load the chat/background profiles from the database; seeds a local default on first run."""
+        from database import db_session
+        from models import AppSettings, LLMProfile
+
+        with db_session() as db:
+            if db.query(LLMProfile).count() == 0:
+                preset = next(p for p in PRESETS if p["key"] == "bionic")
+                db.add(LLMProfile(name=preset["name"], kind=preset["kind"], base_url=settings.LLM_BASE_URL,
+                                  api_key=settings.LLM_API_KEY, model=settings.LLM_MODEL,
+                                  daily_limit=0, allow_practice=True))
+                db.flush()
+            cfg = db.get(AppSettings, 1)
+            first = db.query(LLMProfile).order_by(LLMProfile.id).first()
+            if cfg is not None:
+                if cfg.chat_profile_id is None or db.get(LLMProfile, cfg.chat_profile_id) is None:
+                    cfg.chat_profile_id = first.id
+                if cfg.background_profile_id is None or db.get(LLMProfile, cfg.background_profile_id) is None:
+                    cfg.background_profile_id = first.id
+            ids = {"chat": cfg.chat_profile_id if cfg else first.id,
+                   "background": cfg.background_profile_id if cfg else first.id}
+            for role, profile_id in ids.items():
+                p = db.get(LLMProfile, profile_id)
+                self._active[role] = ActiveProfile(
+                    id=p.id, name=p.name, kind=p.kind, model=p.model, base_url=p.base_url,
+                    api_key=resolve_key(p.api_key), daily_limit=int(p.daily_limit or 0),
+                    allow_practice=bool(p.allow_practice), updated_at=p.updated_at or datetime.utcnow(),
+                ) if p else None
+        self._availability.clear()
+        for role in ROLES:
+            p = self._active[role]
+            if p:
+                logger.info("LLM %s model: %s (%s, %s)", role, p.name, p.kind, p.model)
+
+    def active(self, role: str) -> Optional[ActiveProfile]:
+        if self._active.get(role) is None:
+            try:
+                self.reload_profiles()
+            except Exception as exc:  # noqa: BLE001  (e.g. database not ready yet)
+                logger.warning("Could not load LLM profiles: %s", exc)
+        return self._active.get(role)
+
+    def _provider(self, profile: ActiveProfile):
+        key = (profile.id, profile.updated_at)
+        provider = self._providers.get(key)
+        if provider is None:
+            provider = build_provider(ProviderConfig(kind=profile.kind, model=profile.model,
+                                                     base_url=profile.base_url, api_key=profile.api_key,
+                                                     timeout=float(settings.LLM_TIMEOUT) + 30))
+            self._providers = {k: v for k, v in self._providers.items() if k[0] != profile.id}
+            self._providers[key] = provider
+        return provider
+
+    def practice_allowed(self) -> bool:
+        """Chart practice makes hundreds of calls; only profiles marked for it (local by default) may run it."""
+        p = self.active("background")
+        return bool(p and p.allow_practice)
+
+    def describe(self) -> dict:
+        return {role: ({"id": p.id, "name": p.name, "kind": p.kind, "model": p.model} if (p := self.active(role)) else None)
+                for role in ROLES}
+
+    # ------------------------------------------------------------------
+    # Availability and daily caps
+    # ------------------------------------------------------------------
+    async def is_available(self, role: str = "background") -> bool:
+        """Cached probe of the role's provider, so a stopped server costs a few seconds once, not per call."""
+        profile = self.active(role)
+        if profile is None:
+            return False
+        cached = self._availability.get(profile.id)
+        if cached and time.monotonic() - cached[1] < _AVAILABILITY_TTL_SECONDS:
+            return cached[0]
+        ok = await self._provider(profile).ping()
+        if not ok and (not cached or cached[0]):
+            logger.warning("LLM %s model unreachable: %s (%s)", role, profile.name, profile.model)
+        self._availability[profile.id] = (ok, time.monotonic())
+        return ok
+
+    def _consume(self, profile: ActiveProfile) -> bool:
+        """Count one request against the profile's daily cap; False when the cap is reached."""
+        from database import db_session
+        from models import LLMProfile
+
+        today = datetime.now(IST).date()
+        with db_session() as db:
+            row = db.get(LLMProfile, profile.id)
+            if row is None:
+                return False
+            if row.usage_date != today:
+                row.usage_date, row.usage_count = today, 0
+            if row.daily_limit and row.usage_count >= row.daily_limit:
+                if (profile.id, today) not in self._cap_warned:
+                    logger.warning("LLM profile %s reached its daily cap of %d requests", row.name, row.daily_limit)
+                    self._cap_warned.add((profile.id, today))
+                return False
+            row.usage_count += 1
+        return True
+
+    async def _call(self, role: str, messages: list[dict], max_tokens: int, temperature: float,
+                    effort: str) -> Optional[str]:
+        profile = self.active(role)
+        if profile is None or not await self.is_available(role) or not self._consume(profile):
+            return None
         try:
-            await self._async_client.with_options(timeout=3.0, max_retries=0).models.list()
-            available = True
-        except Exception as exc:  # noqa: BLE001
-            if self._available is not False:
-                logger.warning("Local LLM unavailable at %s: %s", settings.LLM_BASE_URL, exc)
-            available = False
-        self._available, self._available_checked_at = available, time.monotonic()
-        return available
+            text = await self._provider(profile).chat(messages, max_tokens=max_tokens, temperature=temperature,
+                                                      effort=effort)
+            return text or None
+        except ProviderError as exc:
+            logger.error("LLM %s call failed (%s): %s", role, profile.name, exc.message)
+            if exc.retryable:
+                self._availability.pop(profile.id, None)
+            return None
 
     # ------------------------------------------------------------------
     # Low-level invocation
     # ------------------------------------------------------------------
-    @async_retry(max_retries=settings.LLM_MAX_RETRIES, base_delay=0.75)
-    async def _invoke_prompt(self, prompt: str) -> str:
-        result = await self.kernel.invoke_prompt(
-            prompt=prompt,
-            arguments=KernelArguments(settings=self._execution_settings),
-        )
-        return clean_output(str(result))
+    async def complete(self, prompt: str, temperature: float = 0.2, max_tokens: int = 400,
+                       role: str = "background") -> Optional[str]:
+        """Single-turn completion for structured jobs; None on failure so callers skip rather than guess."""
+        return await self._call(role, [{"role": "user", "content": prompt}], max_tokens, temperature,
+                                effort="low" if role == "background" else "medium")
 
-    async def complete(self, prompt: str, temperature: float = 0.2, max_tokens: int = 400) -> Optional[str]:
-        """
-        Single-turn completion for the structured AI-analyst jobs (news reads,
-        forecasts, reflection): low temperature, no templating, None on failure
-        so callers can skip rather than store a fallback as if the model said it.
-        """
-        if not await self.is_available():
-            return None
-        try:
-            response = await self._async_client.chat.completions.create(
-                model=settings.LLM_MODEL,
-                messages=[{"role": "user", "content": prompt}],
-                temperature=temperature,
-                max_tokens=max_tokens,
-            )
-            text = clean_output(response.choices[0].message.content or "")
-            return text or None
-        except Exception as exc:  # noqa: BLE001
-            logger.error("LLM completion failed: %s", exc)
-            self._available = None
-            return None
-
-    async def _safe_invoke(self, prompt: str, fallback: str) -> str:
-        if not await self.is_available():
-            return fallback
-        try:
-            text = await self._invoke_prompt(prompt)
-            return text or fallback
-        except Exception as exc:  # noqa: BLE001
-            logger.error("LLM invocation failed, using fallback response: %s", exc)
-            self._available = None  # re-probe next time
-            return fallback
+    async def _safe_invoke(self, prompt: str, fallback: str, role: str = "background") -> str:
+        text = await self.complete(prompt, temperature=settings.LLM_TEMPERATURE, max_tokens=700, role=role)
+        return text or fallback
 
     # ------------------------------------------------------------------
     # Background queue (one job at a time: a local model can't usefully
@@ -178,7 +240,7 @@ class LLMService:
             label, job = await self._queue.get()
             self._busy = True
             try:
-                if await self.is_available():
+                if await self.is_available("background"):
                     await job()
             except asyncio.CancelledError:
                 raise
@@ -192,112 +254,106 @@ class LLMService:
     # High-level orchestration methods
     # ------------------------------------------------------------------
     async def analyze_stock(self, stock_data: dict) -> str:
-        """Narrative read for one stock, grounded in the deterministic analysis sections."""
-        prompt = PromptLibrary.stock_analysis(**stock_data)
-        fallback = ""
-        return await self._safe_invoke(prompt, fallback)
+        """On-demand analyst note (chat model), grounded in the deterministic analysis sections."""
+        return await self._safe_invoke(PromptLibrary.stock_analysis(**stock_data), "", role="chat")
 
     async def generate_recommendation_reasoning(self, rec_data: dict, fallback: str = "") -> str:
-        """Narrative commentary for a trade recommendation."""
-        prompt = PromptLibrary.recommendation_reasoning(**rec_data)
-        return await self._safe_invoke(prompt, fallback)
+        return await self._safe_invoke(PromptLibrary.recommendation_reasoning(**rec_data), fallback)
 
     async def interpret_market_context(self, context_data: dict, fallback: str = "") -> str:
-        """Summarize FII/DII activity, news, and global cues into a market brief."""
-        prompt = PromptLibrary.market_context(**context_data)
-        return await self._safe_invoke(prompt, fallback or "Market context summary unavailable.")
+        return await self._safe_invoke(PromptLibrary.market_context(**context_data),
+                                       fallback or "Market context summary unavailable.")
 
     async def generate_morning_brief(self, brief_data: dict, fallback: str) -> str:
-        prompt = PromptLibrary.morning_brief(**brief_data)
-        return await self._safe_invoke(prompt, fallback)
+        return await self._safe_invoke(PromptLibrary.morning_brief(**brief_data), fallback)
 
     async def generate_coaching_feedback(self, coaching_data: dict) -> str:
-        prompt = PromptLibrary.trading_coach(**coaching_data)
-        fallback = "Coaching feedback unavailable right now."
-        return await self._safe_invoke(prompt, fallback)
+        return await self._safe_invoke(PromptLibrary.trading_coach(**coaching_data),
+                                       "Coaching feedback unavailable right now.", role="chat")
 
     async def explain_ranking_change(self, change_data: dict) -> str:
-        prompt = PromptLibrary.ranking_change_explanation(**change_data)
-        fallback = (
-            f"{change_data.get('symbol')} moved from #{change_data.get('old_rank')} "
-            f"to #{change_data.get('new_rank')} based on updated conviction score."
-        )
-        return await self._safe_invoke(prompt, fallback)
+        fallback = (f"{change_data.get('symbol')} moved from #{change_data.get('old_rank')} "
+                    f"to #{change_data.get('new_rank')} based on updated conviction score.")
+        return await self._safe_invoke(PromptLibrary.ranking_change_explanation(**change_data), fallback)
 
     async def chat(self, user_message: str, stock_context: Optional[str] = None,
                    context_snippets: Optional[list[str]] = None,
                    history: Optional[list[tuple[str, str, Optional[str]]]] = None,
                    focus: Optional[tuple[str, str]] = None) -> str:
         """
-        ChatGPT-style reply. `history` is prior (user, assistant, viewing-label)
-        turns, oldest first; `context_snippets` carry live market state; `focus`
-        is the (name, symbol) of the stock the user has open. Every user turn is
-        tagged with the stock that was open when it was asked, so "this share"
-        resolves to the right stock even for a small local model.
+        ChatGPT-style reply on the chat model. `history` is prior (user, assistant,
+        viewing-label) turns, oldest first; `context_snippets` carry live market
+        state; `focus` is the (name, symbol) of the stock the user has open. Every
+        user turn is tagged with the stock that was open when it was asked, so
+        "this share" resolves to the right stock even for a small local model.
         """
         self.last_interactive_at = time.monotonic()
-        if not await self.is_available():
-            return (
-                "I can't reach the local model right now. Start LM Studio (or Bionic) with the model "
-                f"'{settings.LLM_MODEL}' loaded at {settings.LLM_BASE_URL} and try again. "
-                "Rankings, trade plans and analysis keep working without it."
-            )
+        profile = self.active("chat")
+        if profile is None or not await self.is_available("chat"):
+            name = f"'{profile.name}' ({profile.model})" if profile else "the chat model"
+            return (f"I can't reach {name} right now. Check it in the AI model settings (top bar), or start "
+                    "the local server if it's a local model. Rankings, trade plans and analysis keep working.")
 
-        chat_history = ChatHistory()
-        chat_history.add_system_message(PromptLibrary.CHAT_SYSTEM)
+        messages: list[dict] = [{"role": "system", "content": PromptLibrary.CHAT_SYSTEM}]
         # Earlier turns first, then today's live facts right next to the question:
         # a small model leans on whatever is nearest, so fresh facts must win over
         # old answers (which may be about other stocks or stale prices).
         for user_turn, assistant_turn, label in history or []:
-            chat_history.add_user_message(PromptLibrary.tag_chat_turn(label, user_turn))
-            chat_history.add_assistant_message(assistant_turn)
+            messages.append({"role": "user", "content": PromptLibrary.tag_chat_turn(label, user_turn)})
+            messages.append({"role": "assistant", "content": assistant_turn})
         if context_snippets:
-            chat_history.add_system_message("Live context (current, overrides anything said earlier):\n"
-                                            + "\n".join(context_snippets))
+            messages.append({"role": "system", "content": "Live context (current, overrides anything said earlier):\n"
+                                                          + "\n".join(context_snippets)})
         focus_label = None
         if focus:
-            # Placed right before the question: small models weight recent instructions most.
-            chat_history.add_system_message(PromptLibrary.chat_focus(*focus))
+            messages.append({"role": "system", "content": PromptLibrary.chat_focus(*focus)})
             focus_label = f"{focus[0]} ({focus[1]})"
         elif stock_context:
             focus_label = stock_context
-        chat_history.add_user_message(PromptLibrary.tag_chat_turn(focus_label, user_message))
+        messages.append({"role": "user", "content": PromptLibrary.tag_chat_turn(focus_label, user_message)})
 
-        chat_service: OpenAIChatCompletion = self.kernel.get_service(self.service_id)
+        if not self._consume(profile):
+            return f"'{profile.name}' has reached its daily request limit ({profile.daily_limit}). Raise it in the AI model settings."
         try:
-            response = await chat_service.get_chat_message_content(
-                chat_history=chat_history,
-                settings=self._execution_settings,
-                kernel=self.kernel,
-            )
-            return clean_output(str(response)) or "I don't have an answer to that yet."
-        except Exception as exc:  # noqa: BLE001
-            logger.error("Chat completion failed: %s", exc)
-            self._available = None
-            return "The local model failed to answer (see backend logs). Please try again."
+            text = await self._provider(profile).chat(messages, max_tokens=900,
+                                                      temperature=settings.LLM_TEMPERATURE, effort="medium")
+            return text or "I don't have an answer to that yet."
+        except ProviderError as exc:
+            logger.error("Chat failed (%s): %s", profile.name, exc.message)
+            self._availability.pop(profile.id, None)
+            return f"The chat model ({profile.name}) failed to answer: {exc.message}"
+
+    # ------------------------------------------------------------------
+    # Profile tools for the settings UI
+    # ------------------------------------------------------------------
+    @staticmethod
+    async def list_models_for(config: ProviderConfig) -> list[str]:
+        return await build_provider(config).list_models()
+
+    @staticmethod
+    async def test_config(config: ProviderConfig) -> dict:
+        """One tiny real request, so the user knows the key, URL and model all work."""
+        provider = build_provider(config)
+        started = time.monotonic()
+        try:
+            reply = await provider.chat([{"role": "user", "content": "Reply with the single word: OK"}],
+                                        max_tokens=20, temperature=0.0, effort="low")
+            return {"ok": True, "reply": reply[:200], "seconds": round(time.monotonic() - started, 2)}
+        except ProviderError as exc:
+            return {"ok": False, "error": exc.message, "seconds": round(time.monotonic() - started, 2)}
 
     # ------------------------------------------------------------------
     # Embeddings (used by memory_service for semantic search over past setups)
     # ------------------------------------------------------------------
     async def embed_text(self, text: str) -> list[float]:
-        """
-        Generate an embedding vector for `text`. Falls back to a deterministic
-        pseudo-embedding if the local server doesn't expose an embeddings endpoint
-        (common for lightweight local inference servers).
-        """
-        if not await self.is_available():
-            return _pseudo_embedding(text)
+        """Embedding from the local server; deterministic pseudo-embedding when it isn't available."""
         try:
-            response = await self._async_client.embeddings.create(
-                model=settings.LLM_EMBEDDING_MODEL,
-                input=text,
-            )
+            response = await self._embed_client.with_options(timeout=20.0, max_retries=0).embeddings.create(
+                model=settings.LLM_EMBEDDING_MODEL, input=text)
             vector = response.data[0].embedding
-            if len(vector) != EMBEDDING_DIM:
-                vector = _resize_vector(vector, EMBEDDING_DIM)
-            return vector
+            return _resize_vector(vector, EMBEDDING_DIM) if len(vector) != EMBEDDING_DIM else vector
         except Exception as exc:  # noqa: BLE001
-            logger.warning("Embeddings endpoint unavailable (%s), using deterministic fallback", exc)
+            logger.debug("Embeddings unavailable (%s), using deterministic fallback", exc)
             return _pseudo_embedding(text)
 
 

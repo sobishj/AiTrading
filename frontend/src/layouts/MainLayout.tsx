@@ -61,15 +61,15 @@ export default function MainLayout({
       {topBar}
 
       <div className="flex-1 min-h-0 p-3 pt-2">
-        <PanelGroup ref={outer} direction="horizontal" autoSaveId="tradeai-layout-outer">
+        <PanelGroup ref={outer} direction="horizontal" autoSaveId="aitrading-layout-outer">
           <Panel defaultSize={d.outer[0]} minSize={8} maxSize={30} className="min-h-0">
             {stockList}
           </Panel>
           <Handle />
           <Panel defaultSize={d.outer[1]} minSize={50}>
-            <PanelGroup ref={main} direction="vertical" autoSaveId="tradeai-layout-main">
+            <PanelGroup ref={main} direction="vertical" autoSaveId="aitrading-layout-main">
               <Panel defaultSize={d.main[0]} minSize={20}>
-                <PanelGroup ref={top} direction="horizontal" autoSaveId="tradeai-layout-top">
+                <PanelGroup ref={top} direction="horizontal" autoSaveId="aitrading-layout-top">
                   <Panel defaultSize={d.top[0]} minSize={30} className="flex flex-col gap-2 min-w-0">
                     <div className="shrink-0 min-w-0">{briefBar}</div>
                     <div className="flex-1 min-h-0 min-w-0">{chart}</div>
@@ -82,7 +82,7 @@ export default function MainLayout({
               </Panel>
               <Handle />
               <Panel defaultSize={d.main[1]} minSize={12}>
-                <PanelGroup ref={bottom} direction="horizontal" autoSaveId="tradeai-layout-bottom">
+                <PanelGroup ref={bottom} direction="horizontal" autoSaveId="aitrading-layout-bottom">
                   <Panel defaultSize={d.bottom[0]} minSize={15} className="min-h-0 min-w-0">
                     {analysis}
                   </Panel>

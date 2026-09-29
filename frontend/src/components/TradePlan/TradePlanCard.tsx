@@ -1,15 +1,21 @@
 import { useResource } from "../../hooks/useResource";
 import apiService from "../../services/api";
+import PositionCard from "../Holdings/PositionCard";
+import type { Position } from "../../services/types";
 import ActionButtons from "./ActionButtons";
 import TradeTable, { inr } from "./TradeTable";
 
 interface TradePlanCardProps {
   symbol: string | null;
   refreshKey: number;
+  /** Your open holding in this stock, if any. */
+  position: Position | null;
+  onPositionChanged: () => void;
+  onOpenHolding: (position: Position) => void;
 }
 
 /** PRD §8: the trade plan for the selected stock, with reasoning, exit rules and Zerodha actions. */
-export default function TradePlanCard({ symbol, refreshKey }: TradePlanCardProps) {
+export default function TradePlanCard({ symbol, refreshKey, position, onPositionChanged, onOpenHolding }: TradePlanCardProps) {
   const { data: plan, loading, error } = useResource(
     symbol ? () => apiService.getTradePlan(symbol) : null,
     [symbol, refreshKey],
@@ -53,6 +59,9 @@ export default function TradePlanCard({ symbol, refreshKey }: TradePlanCardProps
               </div>
             )}
           </div>
+
+          <PositionCard symbol={current.symbol} name={current.name} position={position} plan={current}
+            onChanged={onPositionChanged} onOpen={onOpenHolding} />
 
           <TradeTable plan={current} />
 

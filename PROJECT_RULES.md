@@ -1,4 +1,4 @@
-# TradeAI — Project Rules
+# AiTrading — Project Rules
 
 Rules for anyone (human or AI) changing this codebase. They come from PRD v2.0 §21 plus
 conventions established while building v2.
@@ -10,11 +10,12 @@ conventions established while building v2.
    bottom-right = AI chat. Improve panels in place; don't move, merge or tab them.
 2. **The user never picks a trading mode.** No Swing/Intraday/Options tabs. The engine picks the
    setup and instrument.
-3. **The left panel shows names only.** No scores, badges or prices in the list. A brief highlight
-   on rank changes is the only allowed cue.
+3. **The left panel shows names only** in the Auto and Manual lists. No scores, badges or prices.
+   A brief highlight on rank changes is the only allowed cue. The Holdings tab (added at the user's
+   request) may show P&L and a risk dot, because it's the user's own money.
 4. **Every recommendation carries reasoning, entry, stop-loss, target and risk.** No plan without
    all five.
-5. **The user always has final control over orders.** TradeAI never calls `place_order`. "Prepare
+5. **The user always has final control over orders.** AiTrading never calls `place_order`. "Prepare
    order" hands a basket to Zerodha's own confirmation screen (Kite Publisher).
 6. **Learn from evidence, never by rewriting itself.** Learning means graded outcomes, strategy
    statistics, bounded weight adjustments and the AI analyst's graded forecasts and written

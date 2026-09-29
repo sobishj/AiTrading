@@ -1,12 +1,12 @@
 <#
-  Start TradeAI: database (Docker), local LLM (Bionic), backend, frontend, then open the UI in Chrome.
+  Start AiTrading: database (Docker), local LLM (Bionic), backend, frontend, then open the UI in Chrome.
 
   Safe to run again at any time: anything already running is left alone.
-  Double-click start-tradeai.bat, or run:
-      powershell -ExecutionPolicy Bypass -File C:\VSCode\TradeAI\start-tradeai.ps1
+  Double-click start-aitrading.bat, or run:
+      powershell -ExecutionPolicy Bypass -File C:\VSCode\AiTrading\start-aitrading.ps1
 
   The backend and frontend open in two minimized console windows titled
-  "TradeAI Backend" / "TradeAI Frontend". Close them (or run stop-tradeai.bat) to stop.
+  "AiTrading Backend" / "AiTrading Frontend". Close them (or run stop-aitrading.bat) to stop.
 #>
 # Not "Stop": in Windows PowerShell 5.1 that turns any stderr output from native
 # tools (docker prints warnings there) into terminating errors. Failures are
@@ -40,10 +40,10 @@ function Test-PortListening([int]$Port) {
     return [bool](Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue)
 }
 
-function Test-TradeAIBackend([int]$Port) {
+function Test-AiTradingBackend([int]$Port) {
     try {
         $health = Invoke-RestMethod -Uri "http://localhost:$Port/health" -TimeoutSec 3
-        return $health.app -eq "TradeAI"
+        return $health.app -eq "AiTrading"
     } catch { return $false }
 }
 
@@ -57,7 +57,7 @@ function Wait-Until([scriptblock]$Condition, [int]$TimeoutSeconds, [string]$What
     return $false
 }
 
-Write-Host "Starting TradeAI..." -ForegroundColor White
+Write-Host "Starting AiTrading..." -ForegroundColor White
 
 # ---------------------------------------------------------------- 1. Database (Docker)
 Step "Database (PostgreSQL in Docker)"
@@ -75,7 +75,7 @@ Push-Location $Root
 try {
     if (-not (Invoke-Native "docker" @("compose", "up", "-d", "postgres"))) { Warn "docker compose reported a problem." }
 } finally { Pop-Location }
-$dbReady = { (docker exec tradeai-pg pg_isready -U tradeai 2>$null) -match "accepting connections" }
+$dbReady = { (docker exec aitrading-pg pg_isready -U aitrading 2>$null) -match "accepting connections" }
 if (Wait-Until $dbReady 60 "PostgreSQL") { Ok "PostgreSQL is up (port 5433)." }
 
 # ---------------------------------------------------------------- 2. Local LLM (Bionic) - optional
@@ -89,7 +89,7 @@ if (& $llmReady) {
         Ok "Bionic is serving."
     } else {
         Warn "Bionic opened but its server isn't answering yet. Load the model and start its server;"
-        Warn "TradeAI picks it up automatically. Rankings and plans work without it."
+        Warn "AiTrading picks it up automatically. Rankings and plans work without it."
     }
 } else {
     Warn "Bionic not found - chat and AI features will be offline; everything else works."
@@ -98,7 +98,7 @@ if (& $llmReady) {
 # ---------------------------------------------------------------- 3. Backend
 Step "Backend (FastAPI)"
 $BackendPort = $null
-foreach ($p in 8000, 8010) { if (Test-TradeAIBackend $p) { $BackendPort = $p; break } }
+foreach ($p in 8000, 8010) { if (Test-AiTradingBackend $p) { $BackendPort = $p; break } }
 if ($BackendPort) {
     Ok "Already running on port $BackendPort."
 } else {
@@ -106,9 +106,9 @@ if ($BackendPort) {
     $BackendPort = if (Test-PortListening 8000) { 8010 } else { 8000 }
     if (Test-PortListening $BackendPort) { throw "Ports 8000 and 8010 are both in use by other programs." }
     if ($BackendPort -ne 8000) { Warn "Port 8000 is used by another program - using $BackendPort." }
-    $cmd = "title TradeAI Backend && cd /d `"$BackendDir`" && `"$Python`" -m uvicorn main:app --port $BackendPort"
+    $cmd = "title AiTrading Backend && cd /d `"$BackendDir`" && `"$Python`" -m uvicorn main:app --port $BackendPort"
     Start-Process cmd.exe -ArgumentList "/k", $cmd -WindowStyle Minimized
-    if (Wait-Until { Test-TradeAIBackend $BackendPort } 90 "the backend") { Ok "Backend is up on port $BackendPort." }
+    if (Wait-Until { Test-AiTradingBackend $BackendPort } 90 "the backend") { Ok "Backend is up on port $BackendPort." }
 }
 
 # ---------------------------------------------------------------- 4. Frontend
@@ -123,13 +123,13 @@ if (Test-PortListening 5173) {
     }
     $env:VITE_API_URL = "http://localhost:$BackendPort"
     $env:VITE_WS_URL  = "ws://localhost:$BackendPort/api/ws/updates"
-    $cmd = "title TradeAI Frontend && cd /d `"$FrontendDir`" && npm run dev"
+    $cmd = "title AiTrading Frontend && cd /d `"$FrontendDir`" && npm run dev"
     Start-Process cmd.exe -ArgumentList "/k", $cmd -WindowStyle Minimized
     if (Wait-Until { Test-PortListening 5173 } 60 "the frontend") { Ok "Frontend is up on port 5173." }
 }
 
 # ---------------------------------------------------------------- 5. Open the UI in Chrome
-Step "Opening TradeAI in Chrome"
+Step "Opening AiTrading in Chrome"
 $chrome = $ChromePaths | Where-Object { $_ -and (Test-Path $_) } | Select-Object -First 1
 if ($chrome) {
     Start-Process $chrome -ArgumentList $FrontendUrl
@@ -139,5 +139,5 @@ if ($chrome) {
     Start-Process $FrontendUrl
 }
 
-Write-Host "`nTradeAI is running.  UI: $FrontendUrl   API: http://localhost:$BackendPort/docs" -ForegroundColor White
-Write-Host "To stop it: double-click stop-tradeai.bat (Docker and Bionic are left running)." -ForegroundColor Gray
+Write-Host "`nAiTrading is running.  UI: $FrontendUrl   API: http://localhost:$BackendPort/docs" -ForegroundColor White
+Write-Host "To stop it: double-click stop-aitrading.bat (Docker and Bionic are left running)." -ForegroundColor Gray

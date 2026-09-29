@@ -4,7 +4,7 @@ export type Action = "BUY" | "WAIT" | "AVOID";
 export type RiskLevel = "low" | "medium" | "high";
 export type MarketRegime = "risk-on" | "neutral" | "risk-off";
 /** auto = the AI-managed universe; manual = the user's own list. */
-export type ListMode = "auto" | "manual";
+export type ListMode = "auto" | "manual" | "holdings";
 
 export interface Stock {
   id: number;
@@ -357,11 +357,20 @@ export interface MorningBrief {
   headlines: string[];
 }
 
+export interface ModelRef {
+  id: number;
+  name: string;
+  kind: string;
+  model: string;
+}
+
 export interface AppStatus {
   data_source: "yahoo" | "kite";
   kite_connected: boolean;
   llm_available: boolean;
+  background_llm_available?: boolean;
   llm_model: string;
+  models?: { chat: ModelRef | null; background: ModelRef | null };
   last_ranked_at: string | null;
   market_regime: MarketRegime;
 }
@@ -403,6 +412,7 @@ export interface WsAIUpdateMessage {
 }
 
 export type WsMessage =
+  | WsPositionAlertsMessage
   | WsRankingUpdateMessage
   | WsMorningBriefMessage
   | WsLearningUpdateMessage
@@ -458,5 +468,300 @@ export interface AppSettings {
   weight_volume: number;
   capital: number | null;
   risk_per_trade_pct: number | null;
+  desktop_notifications?: boolean;
   updated_at: string;
+}
+
+// ---------------------------------------------------------------- holdings
+export interface PositionTransaction {
+  id: number;
+  side: "BUY" | "SELL";
+  quantity: number;
+  price: number;
+  date: string;
+  realized_pnl: number | null;
+}
+
+export interface HoldingSuggestion {
+  action: "SELL" | "CONSIDER_SELLING" | "HOLD";
+  reason: string;
+  suggested_stop: number;
+  suggested_target: number;
+  r_multiple: number | null;
+  plan_action: string | null;
+}
+
+export interface Position {
+  id: number;
+  symbol: string;
+  name: string;
+  status: "open" | "closed";
+  quantity: number;
+  avg_price: number;
+  invested: number;
+  opened_on: string;
+  stop_loss: number | null;
+  target: number | null;
+  notes: string | null;
+  last_price: number | null;
+  unrealized_pnl: number;
+  unrealized_pct: number | null;
+  realized_pnl: number;
+  loss_risk: number | null;
+  risk_reasons: string[];
+  suggestion: HoldingSuggestion | null;
+  last_checked_at: string | null;
+  unread_alerts: number;
+  transactions: PositionTransaction[];
+}
+
+export type AlertKind = "stop_hit" | "near_stop" | "target_hit" | "near_target" | "trail_stop" | "loss_risk";
+
+export interface PositionAlert {
+  id: number;
+  position_id: number;
+  symbol: string;
+  name: string;
+  kind: AlertKind;
+  severity: "info" | "warning" | "critical";
+  title: string;
+  message: string;
+  price: number;
+  loss_risk: number | null;
+  acknowledged: boolean;
+  created_at: string;
+  correct: boolean | null;
+}
+
+export interface HoldingsLearning {
+  alerts: { kind: string; graded: number; precision: number | null }[];
+  risk_threshold: number;
+  base_risk_threshold: number;
+  closed_positions: number;
+  closed_win_rate: number | null;
+  realized_pnl: number;
+}
+
+export interface WsPositionAlertsMessage {
+  type: "position_alerts";
+  alerts: PositionAlert[];
+}
+
+// ---------------------------------------------------------------- AI models
+export type ProviderKind = "openai_compatible" | "anthropic";
+
+export interface LLMProfile {
+  id: number;
+  name: string;
+  kind: ProviderKind;
+  base_url: string | null;
+  api_key: string;
+  has_key: boolean;
+  model: string;
+  daily_limit: number;
+  allow_practice: boolean;
+  usage_date: string | null;
+  usage_count: number;
+  // multi-model settings
+  enabled: boolean;
+  priority: number;
+  temperature: number | null;
+  max_tokens: number | null;
+  timeout_s: number | null;
+  hourly_limit: number;
+  input_price: number | null;
+  output_price: number | null;
+  is_local: boolean;
+  key_storage: "none" | "credential_manager" | "environment" | "database";
+}
+
+export interface LLMPreset {
+  key: string;
+  name: string;
+  kind: ProviderKind;
+  base_url: string;
+  api_key: string;
+  model: string;
+  daily_limit: number;
+  allow_practice: boolean;
+  notes: string;
+}
+
+export interface LLMProfilesResponse {
+  profiles: LLMProfile[];
+  chat_profile_id: number | null;
+  background_profile_id: number | null;
+  chat_available: boolean;
+  background_available: boolean;
+}
+
+export interface LLMProfileInput {
+  name: string;
+  kind: ProviderKind;
+  base_url: string | null;
+  api_key: string | null;
+  model: string;
+  daily_limit: number;
+  allow_practice: boolean;
+  enabled?: boolean;
+  priority?: number;
+  temperature?: number | null;
+  max_tokens?: number | null;
+  timeout_s?: number | null;
+  hourly_limit?: number;
+  input_price?: number | null;
+  output_price?: number | null;
+}
+
+// ---------------------------------------------------------------------------
+// Multi-model analysis (evidence-based consensus)
+// ---------------------------------------------------------------------------
+export type ClaimStatus = "SUPPORTED" | "NOT_SUPPORTED" | "UNKNOWN" | "UNVERIFIABLE";
+
+export interface ClaimCheck {
+  key: string;
+  label: string;
+  bias: "bullish" | "bearish" | "risk" | "neutral";
+  status: ClaimStatus;
+  category: string;
+  actual: string;
+  model_evidence: string;
+  model_confidence: number | null;
+  news: { exists: boolean; ref: string; title: string; source: string; published: string; relevance: string } | null;
+  flag: string | null;
+}
+
+export interface EvidenceReport {
+  checks: ClaimCheck[];
+  evidence_score: number | null;
+  supported: number;
+  not_supported: number;
+  unknown: number;
+  unverifiable: number;
+  fabricated_news: number;
+  flags: string[];
+}
+
+export interface ConsensusMember {
+  profile_id: number | null;
+  name: string | null;
+  model: string;
+  recommendation: string | null;
+  direction: string;
+  stated_confidence: number | null;
+  probability_up: number;
+  expected_move_pct: number | null;
+  entry: number | null;
+  target: number | null;
+  stop_loss: number | null;
+  timeframe: string | null;
+  technical: string | null;
+  news: string | null;
+  risks: string[];
+  reasoning: string | null;
+  evidence: EvidenceReport | null;
+  level_issues: string[];
+  weight: number | null;
+  reliability_why: string | null;
+  evidence_why: string | null;
+  latency_ms: number | null;
+  fallback: boolean | null;
+  tokens: { input: number; output: number };
+  outcome: { return_pct: number; correct: boolean } | null;
+}
+
+export interface EvidenceFact {
+  key: string;
+  label: string;
+  actual: string;
+  bias: string;
+  cited_by: string[];
+}
+
+export interface HistoricalFactor {
+  pattern: string;
+  bias: string;
+  occurrences: number;
+  success_rate: number;
+  base_rate: number;
+  edge: number;
+  source: string;
+}
+
+export interface Consensus {
+  id?: number;
+  available: boolean;
+  symbol: string | null;
+  created_at?: string;
+  trigger?: string;
+  signal?: "BUY" | "HOLD" | "SELL";
+  probability_up?: number;
+  evidence_confidence?: number;
+  votes?: Record<string, number>;
+  vote_text?: string;
+  scores?: { model_probability: number; history_probability: number | null; evidence_support: number; agreement: number };
+  levels?: { source: string | null; entry: number | null; target: number | null; stop_loss: number | null } | null;
+  evidence_for?: EvidenceFact[];
+  risks?: EvidenceFact[];
+  historical?: HistoricalFactor[];
+  reasoning?: string[];
+  disagreement?: { model: string; recommendation: string; reasoning: string; supported: string[]; not_supported: string[] }[];
+  members?: ConsensusMember[];
+  failed?: { model: string; name: string; error: string }[];
+  market_regime?: string | null;
+  data_timestamp?: string | null;
+  collected_at?: string | null;
+  data_source?: string | null;
+  disclaimer?: string;
+}
+
+export interface ModelPerformance {
+  profile_id: number | null;
+  model: string;
+  graded: number;
+  hit_rate: number | null;
+  brier: number;
+  stated_confidence_avg: number | null;
+  confidence_when_right: number | null;
+  confidence_when_wrong: number | null;
+  evidence_score_avg: number | null;
+  avg_pnl_pct: number | null;
+  target_hit_rate: number | null;
+  stop_hit_rate: number | null;
+  dissent: { n: number; hit_rate: number | null };
+  by_regime: { label: string; n: number; hit_rate: number | null }[];
+  by_setup: { label: string; n: number; hit_rate: number | null }[];
+}
+
+export interface PatternRow {
+  pattern: string;
+  bias: string;
+  regime: string;
+  source: "history" | "live";
+  occurrences: number;
+  success_rate: number;
+  base_rate: number | null;
+  edge: number | null;
+  avg_return_pct: number;
+}
+
+export interface ModelUsage {
+  profile_id: number;
+  name: string;
+  model: string;
+  is_local: boolean;
+  requests: number;
+  failures: number;
+  requests_this_hour: number;
+  input_tokens: number;
+  output_tokens: number;
+  estimated_cost_usd: number | null;
+  daily_limit: number;
+  hourly_limit: number;
+}
+
+export interface ModelPresets {
+  builtin: { key: string; name: string; description: string; enabled: string[] }[];
+  saved: { id: number; name: string }[];
+  current: { mode: "single" | "multi"; enabled: number[] };
 }

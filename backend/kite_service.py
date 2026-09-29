@@ -5,7 +5,7 @@ Handles authentication, fetching holdings/positions/margins, preparing
 (but never auto-executing) order data, generating manual-execution trade
 URLs, and parsing uploaded Zerodha tradebook CSV/XLSX reports.
 
-Orders are intentionally never placed automatically — TradeAI is an
+Orders are intentionally never placed automatically — AiTrading is an
 advisory tool, not an auto-trading bot.
 """
 import csv
@@ -117,7 +117,7 @@ class KiteService:
                             order_type: str = "MARKET", price: Optional[float] = None,
                             product: str = "CNC") -> dict:
         """
-        Build an order payload dict for manual review — TradeAI never calls
+        Build an order payload dict for manual review — AiTrading never calls
         kite.place_order() itself. The frontend surfaces this via an
         "Open in Zerodha" deep link instead.
         """
@@ -129,7 +129,7 @@ class KiteService:
             "order_type": order_type.upper(),
             "price": price,
             "product": product,
-            "note": "Prepared by TradeAI — review before executing manually in Kite.",
+            "note": "Prepared by AiTrading — review before executing manually in Kite.",
         }
 
     @staticmethod
