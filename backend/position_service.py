@@ -544,6 +544,11 @@ class PositionService:
         qty, avg = float(position.quantity), float(position.avg_price)
         unrealized = (price - avg) * qty if price is not None and qty else 0.0
         unread = [a for a in position.alerts if not a.acknowledged]
+        sells = [t for t in position.transactions if t.side == "SELL"]
+        sold_qty = sum(float(t.quantity) for t in sells)
+        proceeds = sum(float(t.quantity) * float(t.price) for t in sells)
+        realized = sum(float(t.realized_pnl or 0) for t in sells)
+        cost_sold = proceeds - realized
         return {
             "id": position.id,
             "symbol": position.stock.symbol,
@@ -560,6 +565,13 @@ class PositionService:
             "unrealized_pnl": round(unrealized, 2),
             "unrealized_pct": round((price / avg - 1) * 100, 2) if price else None,
             "realized_pnl": round(float(position.realized_pnl or 0), 2),
+            # sold part of the trade (for the Sold view)
+            "sold_quantity": sold_qty,
+            "avg_sell_price": round(proceeds / sold_qty, 2) if sold_qty else None,
+            "avg_buy_price_sold": round(cost_sold / sold_qty, 2) if sold_qty else None,
+            "realized_pct": round(realized / cost_sold * 100, 2) if cost_sold else None,
+            "last_sold_on": max(t.trade_date for t in sells).isoformat() if sells else None,
+            "closed_at": position.closed_at.isoformat() if position.closed_at else None,
             "loss_risk": float(position.loss_risk) if position.loss_risk is not None else None,
             "risk_reasons": json.loads(position.risk_reasons or "[]"),
             "suggestion": json.loads(position.suggestion_json) if position.suggestion_json else None,

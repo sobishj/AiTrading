@@ -28,6 +28,7 @@ ADJUSTMENT_LABELS = {
     "sector_rotation": "Sector rotation bonus",
     "earnings_momentum": "Earnings momentum bonus",
     "ai_view": "AI analyst (Qwen) view, weighted by its track record",
+    "timing": "Entry timing (dip in a long-term uptrend vs. short-term overextension)",
 }
 
 
@@ -154,12 +155,13 @@ class InsightService:
                 "reason": prediction.reason,
                 "horizon_days": prediction.horizon_days,
                 "lessons_version": prediction.lessons_version,
+                "model": prediction.model,
             },
             "news_reads": item.sentiment.get("ai_reads", []),
             "track_record": ai_analyst_service.track_record_text(db),
             "trust_weight": perf["trust_weight"],
             "in_shadow_mode": perf["trust_weight"] == 0,
-            "shadow_reason": (f"Qwen's forecasts don't affect the ranking until {MIN_GRADED_FOR_TRUST} have been graded "
+            "shadow_reason": (f"The AI analyst's forecasts don't affect the ranking until {MIN_GRADED_FOR_TRUST} have been graded "
                               f"and it beats the naive baseline ({perf['graded']} graded so far; each takes "
                               f"{HORIZON_DAYS} trading days).") if perf["trust_weight"] == 0 else None,
         }
@@ -256,6 +258,11 @@ class InsightService:
         from position_service import position_service
 
         lines.extend(position_service.chat_lines(db))
+        # How this user actually trades (measured from their recorded trades) — tailor advice to it.
+        from trader_profile_service import trader_profile_service
+        style = trader_profile_service.block(db, selected.symbol if selected is not None else None)
+        lines.append("The user's trading style, measured from their recorded trades (tailor advice to it; "
+                     "don't let it change what the data says): " + style.replace("\n", " | "))
         if selected is not None:
             prediction = ai_analyst_service.todays_predictions(db).get(selected.symbol)
             if prediction is not None:
@@ -309,11 +316,12 @@ class InsightService:
         return facts
 
     @staticmethod
-    def find_symbol_mentions(db: Session, message: str) -> list[str]:
+    def find_symbol_mentions(db: Session, message: str, tracked_only: bool = True) -> list[str]:
         """Watchlist symbols/names mentioned in a chat message (for 'compare X with Y' questions)."""
         text = message.lower()
         found = []
-        for stock in db.query(Stock).filter(tracked_stock_filter()).all():
+        query = db.query(Stock).filter(tracked_stock_filter()) if tracked_only else db.query(Stock)
+        for stock in query.all():
             names = {stock.symbol.lower(), stock.name.lower()} | {
                 k.strip().lower() for k in (stock.keywords or "").split(",") if len(k.strip()) > 3}
             if any(n and re.search(rf"(?<![a-z0-9]){re.escape(n)}(?![a-z0-9])", text) for n in names):

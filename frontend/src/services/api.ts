@@ -7,7 +7,9 @@ import type {
   ModelPresets,
   ModelUsage,
   PatternRow,
+  TradingStyle,
   LLMProfile,
+  ModelCredit,
   LLMProfileInput,
   LLMProfilesResponse,
   Position,
@@ -235,6 +237,16 @@ class ApiService {
   }
 
   // ---------------------------------------------------------------- holdings
+  async recordTrades(symbol: string, actions: { side: "BUY" | "SELL"; quantity: number; price: number; trade_date: string }[]) {
+    const { data } = await this.client.post("/trades/record", { symbol, actions });
+    return data as { symbol: string; recorded: { side: string; quantity: number; price: number; trade_date: string }[] };
+  }
+
+  async getTradingStyle() {
+    const { data } = await this.client.get("/profile/trading-style");
+    return data as TradingStyle;
+  }
+
   async getPositions(status: "open" | "closed" | "all" = "open"): Promise<Position[]> {
     const { data } = await this.client.get<Position[]>("/positions", { params: { status } });
     return data;
@@ -357,6 +369,16 @@ class ApiService {
 
   async getLLMPresets(): Promise<LLMPreset[]> {
     const { data } = await this.client.get<LLMPreset[]>("/llm/presets");
+    return data;
+  }
+
+  async getModelCredit(refresh = false): Promise<ModelCredit[]> {
+    const { data } = await this.client.get<ModelCredit[]>("/llm/credit", { params: { refresh }, timeout: 30000 });
+    return data;
+  }
+
+  async checkModelCredit(profileId: number): Promise<ModelCredit> {
+    const { data } = await this.client.post<ModelCredit>(`/llm/profiles/${profileId}/check-credit`, undefined, { timeout: 120000 });
     return data;
   }
 

@@ -10,7 +10,10 @@ from sqlalchemy.orm import Session
 
 from credential_store import delete_secret, store_secret
 from database import get_db
-from llm_providers import PRESETS, ProviderConfig, ProviderError, mask_key, resolve_key
+import time
+
+from llm_providers import (PRESETS, ProviderConfig, ProviderError, balance_source, build_provider, fetch_balance,
+                           mask_key, resolve_key)
 from llm_service import llm_service
 from models import AppSettings, LLMProfile
 from ranking_service import ranking_service
@@ -164,6 +167,86 @@ async def provider_status(db: Session = Depends(get_db)):
         return {"id": p.id, "connected": bool(ok)}
 
     return await asyncio.gather(*(probe(p) for p in profiles))
+
+
+BALANCE_CACHE_SECONDS = 300
+_balance_cache: dict[int, tuple[float, dict]] = {}
+_CONSOLE = {"anthropic": "console.anthropic.com → Plans & Billing", "openai": "platform.openai.com → Billing",
+            "gemini": "Google AI Studio / Cloud billing"}
+
+
+def _profile_config(p: LLMProfile, timeout: float = 30.0) -> ProviderConfig:
+    return ProviderConfig(kind=p.kind, model=p.model, base_url=p.base_url or None,
+                          api_key=resolve_key(p.api_key), timeout=timeout)
+
+
+def _console_hint(p: LLMProfile) -> str:
+    url = (p.base_url or "").lower()
+    key = "anthropic" if p.kind == "anthropic" else "openai" if "openai.com" in url else         "gemini" if "googleapis" in url else None
+    return _CONSOLE.get(key, "the provider's website")
+
+
+async def _credit_for(p: LLMProfile, refresh: bool) -> dict:
+    """
+    What the app can truthfully say about this model's credit:
+    local (free) / live balance (providers with a balance API) / credit state seen
+    on the last real call / unknown. Never a guess.
+    """
+    if p.is_local:
+        return {"profile_id": p.id, "status": "local", "label": "Local · free"}
+    seen = llm_service.credit.get(p.id)
+    if balance_source(_profile_config(p)):
+        cached = _balance_cache.get(p.id)
+        if refresh or cached is None or time.monotonic() - cached[0] > BALANCE_CACHE_SECONDS:
+            try:
+                balance = await fetch_balance(_profile_config(p, timeout=10.0))
+                entry = {"status": "balance" if balance["amount"] > 0 else "no_credit", **balance,
+                         "label": f"{balance['currency']} {balance['amount']:,.2f} left"
+                         if balance["amount"] > 0 else "Out of credit"}
+            except ProviderError as exc:
+                entry = {"status": "error", "label": "Balance unavailable", "message": exc.message}
+            cached = (time.monotonic(), entry)
+            _balance_cache[p.id] = cached
+        return {"profile_id": p.id, **cached[1], "checked_at": seen["at"] if seen else None}
+    note = f"This provider has no balance API — see {_console_hint(p)}."
+    if seen and seen["state"] == "no_credit":
+        return {"profile_id": p.id, "status": "no_credit", "label": "Out of credit", "message": seen["message"],
+                "checked_at": seen["at"], "note": note}
+    if seen:
+        return {"profile_id": p.id, "status": "credit_ok", "label": "Credit OK", "checked_at": seen["at"],
+                "note": note + " 'Credit OK' means its last request succeeded."}
+    return {"profile_id": p.id, "status": "unknown", "label": "Paid · balance not shown", "checked_at": None,
+            "note": note + " Use Check to confirm it has credit."}
+
+
+@router.get("/llm/credit")
+async def credit_status(refresh: bool = False, db: Session = Depends(get_db)):
+    """Per saved model: local/free, live prepaid balance, or the credit state its last real call showed."""
+    import asyncio
+    profiles = db.query(LLMProfile).order_by(LLMProfile.id).all()
+    return await asyncio.gather(*(_credit_for(p, refresh) for p in profiles))
+
+
+@router.post("/llm/profiles/{profile_id}/check-credit")
+async def check_credit(profile_id: int, db: Session = Depends(get_db)):
+    """
+    For providers without a balance API: send one tiny request (a few tokens,
+    about a cent at most) — success means the account has credit.
+    """
+    profile = db.get(LLMProfile, profile_id)
+    if profile is None:
+        raise HTTPException(status_code=404, detail="Model profile not found")
+    if not profile.is_local and not balance_source(_profile_config(profile)):
+        try:
+            await build_provider(_profile_config(profile)).chat(
+                [{"role": "user", "content": "Reply with the single word: OK"}], max_tokens=5, temperature=0.0,
+                effort="low")
+            llm_service.note_credit(profile.id)
+        except ProviderError as exc:
+            llm_service.note_credit(profile.id, exc)
+            if not exc.no_credit:
+                return {**await _credit_for(profile, refresh=False), "error": exc.message}
+    return await _credit_for(profile, refresh=True)
 
 
 @router.put("/llm/active")

@@ -14,7 +14,8 @@ function toMessages(row: ChatResponse): ChatMessage[] {
   const key = row.id ?? row.timestamp;
   return [
     { id: `u-${key}`, role: "user", content: row.user_message, timestamp: row.timestamp, stockContext: row.stock_context },
-    { id: `a-${key}`, role: "assistant", content: row.ai_response, timestamp: row.timestamp, stockContext: row.stock_context },
+    { id: `a-${key}`, role: "assistant", content: row.ai_response, timestamp: row.timestamp, stockContext: row.stock_context,
+      tradeProposal: row.trade_proposal ?? null },
   ];
 }
 

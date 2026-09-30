@@ -26,8 +26,8 @@ function Section({ title, children }: { title: string; children: React.ReactNode
 /** One editable row of the holding's history (a buy or a sale). */
 function TransactionRow({ tx, onSave, onDelete }: {
   tx: PositionTransaction;
-  onSave: (q: number, p: number, d: string) => Promise<void>;
-  onDelete: () => Promise<void>;
+  onSave: (q: number, p: number, d: string) => Promise<boolean>;
+  onDelete: () => Promise<boolean>;
 }) {
   const [editing, setEditing] = useState(false);
   const [confirming, setConfirming] = useState(false);
@@ -43,7 +43,7 @@ function TransactionRow({ tx, onSave, onDelete }: {
         <td><input value={q} onChange={(e) => setQ(e.target.value)} inputMode="decimal" className={field} /></td>
         <td><input value={p} onChange={(e) => setP(e.target.value)} inputMode="decimal" className={field} /></td>
         <td colSpan={2} className="text-right whitespace-nowrap">
-          <button onClick={async () => { await onSave(Number(q), Number(p), d); setEditing(false); }} className="text-neon-emerald hover:underline mr-2">Save</button>
+          <button onClick={async () => { if (await onSave(Number(q), Number(p), d)) setEditing(false); }} className="text-neon-emerald hover:underline mr-2">Save</button>
           <button onClick={() => setEditing(false)} className="text-slate-400 hover:underline">Cancel</button>
         </td>
       </tr>
@@ -61,7 +61,7 @@ function TransactionRow({ tx, onSave, onDelete }: {
       <td className="text-right whitespace-nowrap">
         {confirming ? (
           <>
-            <button onClick={async () => { await onDelete(); setConfirming(false); }} className="text-neon-rose hover:underline mr-2">Delete</button>
+            <button onClick={async () => { if (await onDelete()) setConfirming(false); }} className="text-neon-rose hover:underline mr-2">Delete</button>
             <button onClick={() => setConfirming(false)} className="text-slate-400 hover:underline">Keep</button>
           </>
         ) : (
@@ -121,7 +121,8 @@ export default function HoldingWindow({ positionId, onClose, onChanged }: Holdin
     load(true);
   }, [load]);
 
-  const run = async (key: string, action: () => Promise<Position | null | void>, note: string, resetForms = true) => {
+  /** Runs a change; returns whether it was saved (failed edits stay open with the error shown). */
+  const run = async (key: string, action: () => Promise<Position | null | void>, note: string, resetForms = true): Promise<boolean> => {
     setSaving(key);
     setError(null);
     setSavedNote(null);
@@ -130,13 +131,15 @@ export default function HoldingWindow({ positionId, onClose, onChanged }: Holdin
       if (result === null) {
         onChanged();
         onClose();
-        return;
+        return true;
       }
       await load(resetForms);
       setSavedNote(note);
       onChanged();
+      return true;
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Could not save");
+      setError(e instanceof Error ? `Not saved: ${e.message}` : "Not saved — the backend didn't respond");
+      return false;
     } finally {
       setSaving(null);
     }
@@ -169,7 +172,13 @@ export default function HoldingWindow({ positionId, onClose, onChanged }: Holdin
           <div>
             <h3 className="text-lg font-semibold">{position.name} <span className="text-xs font-mono text-slate-500">NSE:{position.symbol}</span></h3>
             <p className="text-xs text-slate-400">
-              {open ? `${position.quantity} shares @ ${inr(position.avg_price)} · invested ${inr(position.invested, 0)}` : "Closed holding"}
+              {open
+                ? `${position.quantity} shares @ ${inr(position.avg_price)} · invested ${inr(position.invested, 0)}`
+                : `Sold ${position.sold_quantity ?? ""} · bought ${position.avg_buy_price_sold ? inr(position.avg_buy_price_sold) : "—"} → sold ${
+                    position.avg_sell_price ? inr(position.avg_sell_price) : "—"}${
+                    position.realized_pct !== null && position.realized_pct !== undefined
+                      ? ` · ${position.realized_pct >= 0 ? "+" : ""}${position.realized_pct.toFixed(1)}%` : ""}${
+                    position.last_sold_on ? ` · closed ${position.last_sold_on}` : ""}`}
               {position.last_price !== null && ` · now ${inr(position.last_price)}`}
             </p>
           </div>
@@ -235,6 +244,13 @@ export default function HoldingWindow({ positionId, onClose, onChanged }: Holdin
               ))}
             </tbody>
           </table>
+          {saving?.startsWith("tx") || saving?.startsWith("del") ? (
+            <p className="text-xs text-slate-400">Saving…</p>
+          ) : error ? (
+            <p className="text-xs text-neon-rose">{error}</p>
+          ) : savedNote ? (
+            <p className="text-xs text-neon-emerald">✓ {savedNote}</p>
+          ) : null}
         </Section>
 
         {/* Stop-loss & target with the AI suggestion below */}

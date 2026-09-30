@@ -179,6 +179,7 @@ class TradePlanResponse(BaseModel):
     exit_logic: str
     recommendation_id: Optional[int] = None
     generated_at: datetime
+    first_recommended_at: Optional[datetime] = None   # when this (still valid) trade was first recommended
     market_regime: str
     quantity: int
     capital_required: float
@@ -253,6 +254,7 @@ class ChatMessageResponse(BaseModel):
     stock_context: Optional[str] = None
     timestamp: datetime
     id: Optional[int] = None
+    trade_proposal: Optional[dict] = None   # a trade you reported in chat, awaiting your confirmation
 
 
 # ---------------------------------------------------------------------------

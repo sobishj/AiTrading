@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import apiService from "../../services/api";
-import type { LLMPreset, LLMProfile, LLMProfilesResponse, ModelPresets, ModelUsage, ProviderKind } from "../../services/types";
+import type { LLMPreset, LLMProfile, LLMProfilesResponse, ModelCredit, ModelPresets, ModelUsage, ProviderKind } from "../../services/types";
 
 interface ModelSettingsModalProps {
   onClose: () => void;
@@ -31,6 +31,18 @@ interface Draft {
 const num = (v: string) => (v.trim() === "" ? null : Number(v));
 const str = (v: number | null | undefined) => (v === null || v === undefined ? "" : String(v));
 
+const CREDIT_STYLE: Record<ModelCredit["status"], string> = {
+  local: "text-neon-emerald bg-neon-emerald/10",
+  balance: "text-neon-emerald bg-neon-emerald/10",
+  credit_ok: "text-neon-emerald bg-neon-emerald/10",
+  no_credit: "text-neon-rose bg-neon-rose/10",
+  unknown: "text-slate-400 bg-white/5",
+  error: "text-amber-300 bg-amber-300/10",
+};
+
+/** Paid models whose balance can't be read: a tiny real request is the only way to confirm credit. */
+const needsCheck = (c?: ModelCredit) => !!c && ["unknown", "credit_ok", "no_credit"].includes(c.status);
+
 const input =
   "w-full bg-base-800/80 border border-white/10 rounded-lg px-3 py-1.5 text-sm text-slate-200 focus:outline-none focus:border-neon-blue/50";
 
@@ -51,11 +63,47 @@ export default function ModelSettingsModal({ onClose, onChanged }: ModelSettings
   const [usage, setUsage] = useState<Record<number, ModelUsage>>({});
   const [presetsInfo, setPresetsInfo] = useState<ModelPresets | null>(null);
   const [presetName, setPresetName] = useState("");
+  const [credit, setCredit] = useState<Record<number, ModelCredit>>({});
 
   const loadExtras = () => {
     apiService.getProviderStatus().then((rows) => setStatus(Object.fromEntries(rows.map((r) => [r.id, r.connected])))).catch(() => {});
     apiService.getModelUsage().then((rows) => setUsage(Object.fromEntries(rows.map((r) => [r.profile_id, r])))).catch(() => {});
     apiService.getModelPresets().then(setPresetsInfo).catch(() => {});
+    apiService.getModelCredit().then((rows) => setCredit(Object.fromEntries(rows.map((r) => [r.profile_id, r])))).catch(() => {});
+  };
+
+  const checkCredit = async (p: LLMProfile) => {
+    setBusy(`credit-${p.id}`);
+    setMessage(null);
+    try {
+      const c = await apiService.checkModelCredit(p.id);
+      setCredit((prev) => ({ ...prev, [p.id]: c }));
+      if (c.error) setMessage({ ok: false, text: `${p.name}: ${c.error}` });
+    } catch (e) {
+      setMessage({ ok: false, text: e instanceof Error ? e.message : "Credit check failed" });
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const creditBadge = (p: LLMProfile) => {
+    const c = credit[p.id];
+    if (!c) return null;
+    return (
+      <span className="inline-flex items-center gap-1.5">
+        <span className={`text-[10px] px-1.5 rounded ${CREDIT_STYLE[c.status]}`}
+          title={[c.message, c.note, c.checked_at ? `Last seen: ${new Date(c.checked_at).toLocaleString("en-IN")}` : ""].filter(Boolean).join("\n")}>
+          {c.label}
+        </span>
+        {needsCheck(c) && (
+          <button onClick={() => checkCredit(p)} disabled={busy !== null}
+            title="Sends one tiny request (about a cent at most) to confirm the account has credit"
+            className="text-[10px] text-neon-blue hover:underline disabled:opacity-40">
+            {busy === `credit-${p.id}` ? "Checking…" : "Check"}
+          </button>
+        )}
+      </span>
+    );
   };
   const load = () => {
     loadExtras();
@@ -74,13 +122,17 @@ export default function ModelSettingsModal({ onClose, onChanged }: ModelSettings
     if (!data) return;
     const chat = role === "chat" ? id : data.chat_profile_id!;
     const background = role === "background" ? id : data.background_profile_id!;
-    setBusy("active");
+    const previous = data;
+    // Show the choice at once; reachability is re-checked in the background (slow when a local server is off).
+    setData({ ...data, chat_profile_id: chat, background_profile_id: background });
+    setMessage(null);
     try {
       await apiService.setActiveModels(chat, background);
-      await load();
       onChanged();
-    } finally {
-      setBusy(null);
+      load();
+    } catch (e) {
+      setData(previous);
+      setMessage({ ok: false, text: `Could not switch the model: ${e instanceof Error ? e.message : "backend not reachable"}` });
     }
   };
 
@@ -164,12 +216,14 @@ export default function ModelSettingsModal({ onClose, onChanged }: ModelSettings
   };
 
   const toggleEnabled = async (p: LLMProfile) => {
+    if (data) setData({ ...data, profiles: data.profiles.map((x) => (x.id === p.id ? { ...x, enabled: !p.enabled } : x)) });
     try {
       await apiService.saveLLMProfile({ name: p.name, kind: p.kind, base_url: p.base_url, api_key: null, model: p.model,
         daily_limit: p.daily_limit, allow_practice: p.allow_practice, enabled: !p.enabled }, p.id);
       await load();
     } catch (e) {
       setMessage({ ok: false, text: e instanceof Error ? e.message : "Could not update" });
+      load();   // put the tick back to what is actually saved
     }
   };
 
@@ -201,6 +255,7 @@ export default function ModelSettingsModal({ onClose, onChanged }: ModelSettings
   const renderRole = (role: "chat" | "background", label: string, hint: string) => {
     const current = role === "chat" ? data?.chat_profile_id : data?.background_profile_id;
     const available = role === "chat" ? data?.chat_available : data?.background_available;
+    const currentProfile = byId(current ?? null);
     return (
       <label key={role} className="block space-y-1">
         <span className="text-xs text-slate-400 flex items-center gap-2">
@@ -208,9 +263,16 @@ export default function ModelSettingsModal({ onClose, onChanged }: ModelSettings
           <span className={`w-1.5 h-1.5 rounded-full ${available ? "bg-neon-emerald" : "bg-neon-rose"}`} />
           <span className="text-[10px]">{available ? "reachable" : "not reachable"}</span>
         </span>
-        <select value={current ?? ""} disabled={busy === "active"} onChange={(e) => setActive(role, Number(e.target.value))} className={input}>
-          {data?.profiles.map((p) => <option key={p.id} value={p.id}>{p.name} — {p.model}</option>)}
+        <select value={current ?? ""} onChange={(e) => setActive(role, Number(e.target.value))} className={input}>
+          {data?.profiles.map((p) => (
+            <option key={p.id} value={p.id}>
+              {p.name} — {p.model}{credit[p.id] ? ` · ${credit[p.id].status === "no_credit" ? "⚠ " : ""}${credit[p.id].label}` : ""}
+            </option>
+          ))}
         </select>
+        {currentProfile && credit[currentProfile.id] && (
+          <span className="flex items-center gap-1 text-[10px] text-slate-500">Credit: {creditBadge(currentProfile)}</span>
+        )}
         <span className="block text-[10px] text-slate-500">{hint}</span>
       </label>
     );
@@ -287,6 +349,7 @@ export default function ModelSettingsModal({ onClose, onChanged }: ModelSettings
                   {p.name} <span className="text-slate-500 font-mono text-xs">· {p.model}</span>
                   <span className={`ml-2 text-[10px] px-1.5 rounded ${p.is_local ? "bg-neon-emerald/10 text-neon-emerald" : "bg-neon-blue/10 text-neon-blue"}`}>
                     {p.is_local ? "local" : "cloud"}</span>
+                  {!p.is_local && <span className="ml-2">{creditBadge(p)}</span>}
                 </div>
                 <div className="text-[11px] text-slate-500">
                   {p.kind === "anthropic" ? "Anthropic SDK" : p.base_url} · key {p.key_storage === "none" ? "none" : p.api_key} ·

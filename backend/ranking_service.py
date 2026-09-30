@@ -30,7 +30,7 @@ from sqlalchemy.orm import Session
 
 from analysis_service import (
     ALL_STRATEGIES, EARNINGS_MOMENTUM, NO_SETUP, PRICE_SETUPS, SECTOR_ROTATION,
-    TechnicalSnapshot, TradePlan, analysis_service,
+    TechnicalSnapshot, TradePlan, analysis_service, timing_score,
 )
 from config import settings as app_config
 from data_provider import yahoo_provider
@@ -71,6 +71,23 @@ MAX_LEARNED_EDGE = 5.0
 MIN_LEARNED_TRADES = 8
 SECTOR_ROTATION_BONUS = 3.0
 EARNINGS_BONUS = 3.0
+# Entry timing (analysis_service.timing_score): conviction points per unit of
+# score, capped. Enough to demote a stock that just ran up below the BUY bar
+# and to favour dips in long-term uptrends; tuned on 2020-23, checked on 2024-26.
+TIMING_WEIGHT = 5.0
+MAX_TIMING_ADJUSTMENT = 20.0
+TIMING_NOTE_THRESHOLD = 2.0
+
+# No new BUY idea from a still-forming bar until this share of the session has
+# passed (~10:15 IST): opening prices and volumes are too noisy to act on.
+MIN_BAR_PROGRESS_FOR_NEW_PICKS = 0.16
+
+# List order: actionable ideas first (see rerank_watchlist).
+ACTION_ORDER = {"BUY": 0, "WAIT": 1, "AVOID": 2}
+
+# Bumped when the pick logic changes, so a morning brief written by older logic
+# is regenerated instead of showing a pick the current engine wouldn't make.
+ENGINE_VERSION = "2026-09-30b timing+nifty-gate"
 
 # How many top BUY ideas the background loop records as recommendations
 # (market memory) each run. Existing ones are reused while still valid.
@@ -109,6 +126,7 @@ class RankingContext:
     benchmark_return_20d: Optional[float] = None
     market_regime: str = "neutral"
     market_summary: str = ""
+    market_uptrend: bool = True     # NIFTY above its EMA 50; False blocks new BUYs
     top_sectors: list[str] = field(default_factory=list)
     strategy_stats: dict = field(default_factory=dict)
     weights: tuple[float, float, float] = (DEFAULT_WEIGHT_TECHNICAL, DEFAULT_WEIGHT_SENTIMENT, DEFAULT_WEIGHT_VOLUME)
@@ -124,7 +142,7 @@ def _clamp(value: float, low: float, high: float) -> float:
 
 class RankingService:
     def __init__(self) -> None:
-        # symbol -> (rank, score, strategy, technical_score, sentiment_score)
+        # symbol -> (rank, score, strategy, technical_score, sentiment_score, action)
         self._last_ranking: dict[str, tuple] = {}
         self._history: list[dict] = []
         self._recent_changes: list[dict] = []
@@ -279,11 +297,20 @@ class RankingService:
             from ai_analyst_service import AIAnalystService  # local import: avoids a cycle
             adjustments["ai_view"] = AIAnalystService.conviction_adjustment(forecast[0], context.ai_trust)
 
+        timing = timing_score(t)
+        adjustments["timing"] = round(_clamp(TIMING_WEIGHT * timing, -MAX_TIMING_ADJUSTMENT, MAX_TIMING_ADJUSTMENT), 2)
+        if timing >= TIMING_NOTE_THRESHOLD:
+            item.tags.append("Dip within a long-term uptrend (historically a good entry)")
+        elif timing <= -TIMING_NOTE_THRESHOLD:
+            item.tags.append(f"Short-term stretched ({t.return_5d or 0:+.1f}% in 5 days) — such runs often give back; "
+                             "wait for a pullback")
+
         if not t.has_data:
             adjustments = {}
         item.adjustments = adjustments
         item.conviction_score = round(_clamp(item.base_score + sum(adjustments.values()), 0.0, 100.0), 2)
-        item.plan = analysis_service.build_trade_plan(t, strategy, item.conviction_score, context.market_regime)
+        item.plan = analysis_service.build_trade_plan(t, strategy, item.conviction_score, context.market_regime,
+                                                      context.market_uptrend)
 
     # ------------------------------------------------------------------
     # Ranking run
@@ -306,6 +333,8 @@ class RankingService:
         perf = ai_analyst_service.performance(db)
         return RankingContext(
             benchmark_return_20d=benchmark.return_20d,
+            market_uptrend=not (benchmark.has_data and benchmark.ema_50 is not None
+                                and benchmark.close < benchmark.ema_50),
             market_regime=overview["regime"],
             market_summary=overview["summary"],
             strategy_stats={row["strategy"]: row for row in learning_service.strategy_performance(db)},
@@ -396,9 +425,12 @@ class RankingService:
             return result
 
     def rerank_watchlist(self, ranked_stocks: list[RankedStock]) -> list[RankedStock]:
-        """Sort by conviction (BUY ideas first on ties), assign ranks, and explain rank moves."""
-        action_order = {"BUY": 0, "WAIT": 1, "AVOID": 2}
-        ranked_stocks.sort(key=lambda r: (-r.conviction_score, action_order.get(r.action, 3), r.symbol))
+        """
+        Order by what the engine says to do — BUY, then WAIT, then AVOID — and
+        by conviction within each group, so an AVOID never ranks above a
+        tradeable idea. Assign ranks and explain rank moves.
+        """
+        ranked_stocks.sort(key=lambda r: (ACTION_ORDER.get(r.action, 3), -r.conviction_score, r.symbol))
 
         now = datetime.utcnow().isoformat()
         for idx, item in enumerate(ranked_stocks, start=1):
@@ -416,7 +448,7 @@ class RankingService:
         self._recent_changes = self._recent_changes[-100:]
         self._last_ranking = {
             item.symbol: (item.rank, item.conviction_score, item.strategy,
-                          item.technical.technical_score, item.sentiment["score"])
+                          item.technical.technical_score, item.sentiment["score"], item.action)
             for item in ranked_stocks
         }
         self._history.append({
@@ -429,9 +461,11 @@ class RankingService:
     @staticmethod
     def _explain_change(item: RankedStock, prev: tuple) -> str:
         """Plain-English reason for a rank move, from the components that actually changed."""
-        old_rank, old_score, old_strategy, old_tech, old_sent = prev
+        old_rank, old_score, old_strategy, old_tech, old_sent, old_action = prev
         direction = "Up" if item.rank < old_rank else "Down"
         reasons = []
+        if item.action != old_action:
+            reasons.append(f"now {item.action} (was {old_action})")
         if item.strategy != old_strategy and item.strategy != NO_SETUP:
             reasons.append(f"new {item.strategy} setup")
         elif item.strategy != old_strategy:
@@ -512,11 +546,13 @@ class RankingService:
         if plan is None:
             return "No price data available to build a plan."
         drivers = self.score_drivers(item)
+        why = "; ".join(plan.reasons)
+        why = why[:1].upper() + why[1:]
+        setup = f"{item.strategy} setup" if item.strategy != NO_SETUP else "No setup"
         lead = {
             "BUY": f"{plan.strategy} setup with conviction {item.conviction_score:.0f}/100.",
-            "WAIT": ("No clean entry signal yet" if item.strategy == NO_SETUP else f"{item.strategy} forming")
-                    + f" — conviction {item.conviction_score:.0f}/100 is below the buy threshold.",
-            "AVOID": f"Avoid fresh longs: {t.trend} with technical score {t.technical_score:.0f}/100.",
+            "WAIT": f"Wait — {setup}, conviction {item.conviction_score:.0f}/100. Not a buy yet: {why}.",
+            "AVOID": f"Avoid fresh longs: {why}.",
         }[plan.action]
         parts = [lead]
         if drivers:
@@ -558,12 +594,14 @@ class RankingService:
             "confidence_score": item.conviction_score,
             "current_price": item.technical.close,
             "change_pct": item.technical.change_pct,
-            "reasoning": rec.reasoning if rec is not None else self.build_reasoning(item),
+            # Always explain with today's numbers; a reused recommendation keeps only its id and first date.
+            "reasoning": self.build_reasoning(item),
             "ai_commentary": rec.ai_commentary if rec is not None else None,
             "invalidation": plan.invalidation,
             "exit_logic": plan.exit_logic,
             "recommendation_id": rec.id if rec is not None else None,
-            "generated_at": (rec.timestamp if rec is not None else self._ranking_cache_at or datetime.utcnow()).isoformat(),
+            "generated_at": (self._ranking_cache_at or datetime.utcnow()).isoformat(),
+            "first_recommended_at": rec.timestamp.isoformat() if rec is not None else None,
             "market_regime": self._context.market_regime,
             **sizing,
         }
@@ -593,9 +631,10 @@ class RankingService:
         """
         Persist a BUY idea as a recommendation — or return the existing one if
         it's still the same trade (same strategy, under a week old, price still
-        near its entry zone and above its stop). Returns None for WAIT/AVOID
-        and when there's no price data: only actionable calls enter market
-        memory, so learning isn't polluted by non-trades.
+        near its entry zone and above its stop). Returns None for WAIT/AVOID,
+        when there's no price data, and for a new idea in the first hour of the
+        session (MIN_BAR_PROGRESS_FOR_NEW_PICKS): only actionable calls enter
+        market memory, so learning isn't polluted by non-trades.
         """
         plan = item.plan
         if plan is None or plan.action != "BUY" or not item.technical.has_data:
@@ -609,6 +648,8 @@ class RankingService:
         )
         if latest is not None and self._still_valid(latest, item):
             return latest
+        if item.technical.bar_progress < MIN_BAR_PROGRESS_FOR_NEW_PICKS:
+            return None
 
         rec = Recommendation(
             stock_id=item.stock_id,

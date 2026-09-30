@@ -139,7 +139,7 @@ export default function TopBar({
             </>
           )}
           {lastRanked && (
-            <span className="text-[11px] text-slate-500" title="Last full re-rank">
+            <span className="text-[11px] text-slate-500" title="Last full refresh">
               ranked {lastRanked.toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" })}
             </span>
           )}
@@ -185,8 +185,8 @@ export default function TopBar({
 
       <div className="flex items-center gap-3 shrink-0">
         <RefreshIntervalControl />
-        <button onClick={onRefresh} disabled={refreshing} className="btn-secondary px-3 py-1.5 text-xs disabled:opacity-50" title="Re-rank now">
-          {refreshing ? "Ranking…" : "Re-rank"}
+        <button onClick={onRefresh} disabled={refreshing} className="btn-secondary px-3 py-1.5 text-xs disabled:opacity-50" title="Refresh prices and rankings now">
+          {refreshing ? "Refreshing…" : "Refresh"}
         </button>
         <AlertsBell refreshKey={alertsKey} onSelect={onAlertSelect} />
         <button

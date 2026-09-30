@@ -15,8 +15,10 @@ import re
 import time
 from dataclasses import dataclass
 from typing import Optional
+from urllib.parse import urlparse
 
 import anthropic
+import httpx
 import openai
 from openai import AsyncOpenAI
 
@@ -44,10 +46,11 @@ def clean_output(text: str) -> str:
 class ProviderError(Exception):
     """A provider call failed; `message` is safe to show in the UI."""
 
-    def __init__(self, message: str, retryable: bool = False):
+    def __init__(self, message: str, retryable: bool = False, no_credit: bool = False):
         super().__init__(message)
         self.message = message
         self.retryable = retryable
+        self.no_credit = no_credit    # the account's prepaid credit / quota is used up
 
 
 @dataclass
@@ -121,7 +124,17 @@ class OpenAICompatibleProvider:
             return False
 
 
+_NO_CREDIT_HINTS = ("insufficient_quota", "insufficient balance", "insufficient credits", "exceeded_current_quota",
+                    "exceeded your current quota", "credit balance", "billing")
+
+
 def _openai_error(exc: Exception) -> ProviderError:
+    status = getattr(exc, "status_code", None)
+    text = f"{getattr(exc, 'code', '') or ''} {exc}".lower()
+    # 402 is DeepSeek's / OpenRouter's "out of balance"; OpenAI and Kimi send a 429 with a quota code.
+    if status == 402 or (status in (400, 403, 429) and any(h in text for h in _NO_CREDIT_HINTS)):
+        return ProviderError("Out of credit — this account's balance or quota is used up. Top up with the provider.",
+                             no_credit=True)
     if isinstance(exc, openai.AuthenticationError):
         return ProviderError("Invalid API key for this provider.")
     if isinstance(exc, openai.NotFoundError):
@@ -191,6 +204,9 @@ class AnthropicProvider:
         except anthropic.RateLimitError as exc:
             raise ProviderError("Rate limited by Anthropic — try again shortly.", retryable=True) from exc
         except anthropic.BadRequestError as exc:
+            if "credit balance" in str(exc.message).lower():
+                raise ProviderError("Out of credit — the Anthropic credit balance is too low. Top up at "
+                                    "console.anthropic.com (Plans & Billing).", no_credit=True) from exc
             raise ProviderError(f"Anthropic rejected the request: {exc.message}") from exc
         except anthropic.APIStatusError as exc:
             raise ProviderError(f"Anthropic error {exc.status_code}: {exc.message}",
@@ -231,6 +247,60 @@ class AnthropicProvider:
             return False
 
 
+# ---------------------------------------------------------------------------
+# Prepaid balance. Only some providers let an API key read it; Anthropic,
+# OpenAI and Gemini don't (their consoles show it), so for those the app can
+# only tell "out of credit" from the error a real call returns.
+# ---------------------------------------------------------------------------
+def balance_source(config: ProviderConfig) -> Optional[str]:
+    """Which balance API serves this config, or None when the provider has none."""
+    if config.kind != "openai_compatible":
+        return None
+    host = (urlparse(config.base_url or "").hostname or "").lower()
+    if host.endswith("moonshot.ai") or host.endswith("moonshot.cn"):
+        return "moonshot"
+    if host.endswith("deepseek.com"):
+        return "deepseek"
+    if host.endswith("openrouter.ai"):
+        return "openrouter"
+    return None
+
+
+async def fetch_balance(config: ProviderConfig) -> Optional[dict]:
+    """{"amount", "currency"} from the provider's balance API; None if it has none. Raises ProviderError."""
+    source = balance_source(config)
+    if source is None:
+        return None
+    parsed = urlparse(config.base_url)
+    root = f"{parsed.scheme}://{parsed.netloc}"
+    url = {"moonshot": f"{root}/v1/users/me/balance", "deepseek": f"{root}/user/balance",
+           "openrouter": f"{root}/api/v1/credits"}[source]
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.get(url, headers={"Authorization": f"Bearer {config.api_key or ''}",
+                                                      "Accept": "application/json"})
+    except httpx.HTTPError as exc:
+        raise ProviderError("Can't reach the provider's balance API.", retryable=True) from exc
+    if response.status_code in (401, 403):
+        raise ProviderError("Invalid API key for this provider.")
+    if response.status_code != 200:
+        raise ProviderError(f"Balance API error {response.status_code}.")
+    try:
+        body = response.json()
+        if source == "moonshot":
+            amount = float(body["data"]["available_balance"])
+            currency = "CNY" if parsed.netloc.endswith(".cn") else "USD"
+        elif source == "deepseek":
+            info = (body.get("balance_infos") or [{}])[0]
+            amount, currency = float(info["total_balance"]), info.get("currency", "USD")
+        else:
+            data = body["data"]
+            amount, currency = float(data["total_credits"]) - float(data["total_usage"]), "USD"
+    except (KeyError, TypeError, ValueError, IndexError) as exc:
+        raise ProviderError("Unexpected reply from the balance API.") from exc
+    return {"amount": round(amount, 2), "currency": currency}
+
+
 def build_provider(config: ProviderConfig):
     if config.kind == "anthropic":
         return AnthropicProvider(config)
@@ -266,6 +336,9 @@ PRESETS: list[dict] = [
      "notes": "Paid. Use https://api.moonshot.cn/v1 for a China-region account. Fetch models to pick one."},
     {"key": "openai", "name": "OpenAI", "kind": "openai_compatible", "base_url": "https://api.openai.com/v1",
      "api_key": "", "model": "", "daily_limit": 300, "allow_practice": False, "notes": "Paid."},
+    {"key": "deepseek", "name": "DeepSeek", "kind": "openai_compatible", "base_url": "https://api.deepseek.com/v1",
+     "api_key": "", "model": "", "daily_limit": 300, "allow_practice": False,
+     "notes": "Paid (prepaid balance, shown in the model list). Fetch models to pick one."},
     {"key": "openrouter", "name": "OpenRouter", "kind": "openai_compatible", "base_url": "https://openrouter.ai/api/v1",
      "api_key": "", "model": "", "daily_limit": 300, "allow_practice": False,
      "notes": "Paid; one key for many providers' models."},

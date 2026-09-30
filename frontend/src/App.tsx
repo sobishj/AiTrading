@@ -198,11 +198,11 @@ export default function App() {
       setStatusVersion((v) => v + 1);
       setNotification(
         result.best_pick
-          ? `Re-ranked ${result.stocks_evaluated} stocks. Best buy: ${result.best_pick}.`
-          : `Re-ranked ${result.stocks_evaluated} stocks. No stock meets the buy criteria right now.`
+          ? `Refreshed ${result.stocks_evaluated} stocks. Best buy: ${result.best_pick}.`
+          : `Refreshed ${result.stocks_evaluated} stocks. No stock meets the buy criteria right now.`
       );
     } catch (err) {
-      setNotification(`Re-rank failed: ${err instanceof Error ? err.message : "unknown error"}`);
+      setNotification(`Refresh failed: ${err instanceof Error ? err.message : "unknown error"}`);
     } finally {
       setRefreshing(false);
     }
@@ -251,6 +251,7 @@ export default function App() {
             holdingsView={
               <HoldingsList
                 positions={holdings.positions}
+                sold={holdings.sold}
                 loading={holdings.loading}
                 error={holdings.error}
                 selectedSymbol={selectedSymbol}
@@ -262,7 +263,11 @@ export default function App() {
           />
         }
         briefBar={
-          <MorningBriefBar brief={brief} outlook={outlookResource.data} loading={briefResource.loading} onSelect={handleSelect} />
+          <MorningBriefBar brief={brief} outlook={outlookResource.data} loading={briefResource.loading} onSelect={handleSelect}
+            live={(() => {
+              const pick = brief?.best_plan ? auto.stocks.find((x) => x.symbol === brief.best_plan!.symbol) : undefined;
+              return pick ? { price: pick.current_price, change_pct: pick.change_pct, rank: pick.rank, action: pick.action } : null;
+            })()} />
         }
         chart={<TradingViewChart symbol={selectedSymbol} name={selected?.name} refreshKey={liveVersion} theme={theme} />}
         tradePlan={
@@ -278,6 +283,7 @@ export default function App() {
             topName={stocks[0]?.name}
             secondName={stocks[1]?.name}
             llmAvailable={llmAvailable}
+            onTradeRecorded={() => holdings.refresh()}
           />
         }
       />

@@ -149,8 +149,9 @@ def test_evidence_outweighs_vote_count():
 
 def test_disagreement_is_preserved_and_confidence_is_not_evidence():
     good = [chk("breakout", "SUPPORTED"), chk("volume_high", "SUPPORTED")]
-    members = [member("qwen", "BUY", 70, good, 1.0), member("claude", "BUY", 72, good, 1.0),
-               member("kimi", "SELL", 35, [chk("rsi_overbought", "SUPPORTED", "bearish")], 1.0)]
+    proven = {"n": 40, "hits": 22}
+    members = [member("qwen", "BUY", 70, good, 1.0, stats=proven), member("claude", "BUY", 72, good, 1.0, stats=proven),
+               member("kimi", "SELL", 35, [chk("rsi_overbought", "SUPPORTED", "bearish")], 1.0, stats=proven)]
     r = combine(members, [], FACTS)
     assert r.signal == "BUY" and r.votes == {"BUY": 2, "HOLD": 0, "SELL": 1}
     assert r.disagreement[0]["model"] == "kimi" and "rsi_overbought" in r.disagreement[0]["supported"]
@@ -158,6 +159,25 @@ def test_disagreement_is_preserved_and_confidence_is_not_evidence():
     assert {e["key"] for e in r.evidence_for} == {"breakout", "volume_high"}
     # stated confidence of 90 for everyone is not what the weights are made of
     assert all("confidence" not in m["evidence_why"] for m in r.members)
+
+
+def test_true_facts_that_argue_against_the_call_do_not_support_it():
+    # SELL backed only by a bullish (true) fact vs the same SELL backed by bearish facts
+    against = combine([member("qwen", "SELL", 20, [chk("positive_news", "SUPPORTED", "bullish")], 1.0),
+                       member("claude", "HOLD", 50, [chk("uptrend", "SUPPORTED")], 1.0)], [], FACTS)
+    backed = combine([member("qwen", "SELL", 20, [chk("breakdown", "SUPPORTED", "bearish")], 1.0),
+                      member("claude", "HOLD", 50, [chk("uptrend", "SUPPORTED")], 1.0)], [], FACTS)
+    assert against.members[0]["weight"] < backed.members[0]["weight"]
+    assert "0 of 1 supported claims" in against.members[0]["evidence_why"]
+
+
+def test_unproven_extreme_probabilities_are_discounted():
+    from consensus_engine import calibrated_probability
+    assert calibrated_probability(10, {})[0] == 30.0            # halfway to 50 with no record
+    assert calibrated_probability(10, {"n": 30})[0] == 10.0     # face value once proven
+    r = combine([member("qwen", "SELL", 10, [chk("breakdown", "SUPPORTED", "bearish")], 1.0),
+                 member("claude", "HOLD", 50, [chk("uptrend", "SUPPORTED")], 1.0)], [], FACTS)
+    assert r.scores["model_probability"] >= 40                  # one unproven 10% can't force a SELL
 
 
 def test_weak_evidence_holds_back_signal_and_empty_is_none():

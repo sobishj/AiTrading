@@ -1,6 +1,7 @@
 import { FormEvent, useEffect, useRef, useState } from "react";
 import { useChat } from "../../hooks/useChat";
 import Markdown from "./Markdown";
+import TradeProposalCard from "./TradeProposalCard";
 
 interface ChatPanelProps {
   symbol: string | null;
@@ -8,10 +9,12 @@ interface ChatPanelProps {
   topName?: string;
   secondName?: string;
   llmAvailable: boolean;
+  /** Called after a trade reported in chat is confirmed and recorded. */
+  onTradeRecorded?: () => void;
 }
 
 /** PRD §10: ChatGPT-style Trading Coach that remembers the conversation and sees the live market. */
-export default function ChatPanel({ symbol, name, topName, secondName, llmAvailable }: ChatPanelProps) {
+export default function ChatPanel({ symbol, name, topName, secondName, llmAvailable, onTradeRecorded }: ChatPanelProps) {
   const { messages, sending, error, sendMessage, clear } = useChat(symbol);
   const [input, setInput] = useState("");
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -82,6 +85,9 @@ export default function ChatPanel({ symbol, name, topName, secondName, llmAvaila
               }`}
             >
               {m.role === "assistant" ? <Markdown text={m.content} /> : m.content}
+              {m.role === "assistant" && m.tradeProposal && (
+                <TradeProposalCard proposal={m.tradeProposal} onRecorded={() => onTradeRecorded?.()} />
+              )}
             </div>
           </div>
         ))}

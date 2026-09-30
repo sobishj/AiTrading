@@ -28,6 +28,7 @@ HISTORY_WEIGHT = 0.4           # share of the final probability from measured fa
 BUY_THRESHOLD, SELL_THRESHOLD = 58.0, 42.0
 MIN_EVIDENCE_FOR_SIGNAL = 0.4  # weighted evidence support below this -> HOLD ("evidence too weak")
 PROB_FLOOR, PROB_CEILING = 10.0, 90.0
+CALIBRATION_SAMPLES = 30       # graded outcomes before a model's probabilities are taken at face value
 
 
 def bucket(recommendation: Optional[str]) -> str:
@@ -64,6 +65,32 @@ def evidence_weight(evidence: dict) -> tuple[float, str]:
         w *= 0.5 ** fabricated
         why += f"; {fabricated} news claim(s) not in the data"
     return max(0.05, w), why
+
+
+def alignment(evidence: dict, call_bucket: str) -> tuple[float, str]:
+    """
+    Share of a model's *supported* directional claims that point the way it calls (BUY -> bullish,
+    SELL -> bearish). A true fact that argues against the call is not evidence for it. HOLD = 1.0.
+    """
+    want = {"BUY": "bullish", "SELL": "bearish"}.get(call_bucket)
+    if want is None:
+        return 1.0, ""
+    directional = [c for c in evidence.get("checks", [])
+                   if c["status"] == "SUPPORTED" and c["bias"] in ("bullish", "bearish")]
+    if not directional:
+        return 0.5, f"no supported claim points {'up' if want == 'bullish' else 'down'}"
+    aligned = sum(1 for c in directional if c["bias"] == want)
+    return aligned / len(directional), f"{aligned} of {len(directional)} supported claims point the way of its {call_bucket}"
+
+
+def calibrated_probability(p: float, stats: dict) -> tuple[float, str]:
+    """
+    An unproven model's probability is pulled halfway toward 50%, reaching face value only after
+    CALIBRATION_SAMPLES graded outcomes (a stated 90% means nothing until outcomes back it up).
+    """
+    n = int(stats.get("n") or 0)
+    k = 0.5 + 0.5 * min(1.0, n / CALIBRATION_SAMPLES)
+    return 50 + (float(p) - 50) * k, ("" if k >= 1 else f"probability discounted toward 50% ({n} graded so far)")
 
 
 @dataclass
@@ -140,12 +167,20 @@ def combine(members: list[dict], factor_stats: list[dict], facts: dict, engine: 
         votes[b] += 1
         rel, rel_why = reliability(m.get("reliability_stats") or {})
         ev, ev_why = evidence_weight(m.get("evidence") or {})
+        align, align_why = alignment(m.get("evidence") or {}, b)
+        ev = max(0.05, ev * (0.25 + 0.75 * align))
+        if align_why:
+            ev_why += f"; {align_why}"
+        p_eff, cal_why = calibrated_probability(m["probability_up"], m.get("reliability_stats") or {})
+        if cal_why:
+            rel_why += f"; {cal_why}"
         weight = rel * ev
         scored.append({**m, "bucket": b, "weight": round(weight, 3), "reliability_weight": round(rel, 2),
-                       "reliability_why": rel_why, "evidence_weight": round(ev, 2), "evidence_why": ev_why})
+                       "reliability_why": rel_why, "evidence_weight": round(ev, 2), "evidence_why": ev_why,
+                       "effective_probability": round(p_eff, 1)})
 
     total_w = sum(s["weight"] for s in scored)
-    p_models = sum(s["weight"] * float(s["probability_up"]) for s in scored) / total_w
+    p_models = sum(s["weight"] * s["effective_probability"] for s in scored) / total_w
     p_hist, history_lines = historical_probability(factor_stats)
     p_final = p_models if p_hist is None else (1 - HISTORY_WEIGHT) * p_models + HISTORY_WEIGHT * p_hist
     p_final = round(max(PROB_FLOOR, min(PROB_CEILING, p_final)), 1)
@@ -177,12 +212,13 @@ def combine(members: list[dict], factor_stats: list[dict], facts: dict, engine: 
                      "cited_by": [x["model"] for x in scored
                                   if any(cc["key"] == c["key"] and cc["status"] == "SUPPORTED"
                                          for cc in (x.get("evidence") or {}).get("checks", []))]}
-            if c["bias"] == "risk" or (want and c["bias"] not in (want, "neutral")):
+            if want is None:
+                # HOLD: facts for a rise on one side, facts against it (and risks) on the other
+                (risks if c["bias"] in ("bearish", "risk") else evidence_for).append(entry)
+            elif c["bias"] == "risk" or c["bias"] not in (want, "neutral"):
                 risks.append(entry)
-            elif want is None or c["bias"] == want:
-                evidence_for.append(entry)
             else:
-                risks.append(entry)
+                evidence_for.append(entry)
 
     # Levels: weighted median of the models whose call matches the signal, sanity-checked
     same = [s for s in scored if s["bucket"] == signal and not s.get("level_issues")]

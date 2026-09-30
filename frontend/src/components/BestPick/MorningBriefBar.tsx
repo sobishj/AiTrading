@@ -1,5 +1,5 @@
 import { useState } from "react";
-import type { MarketOutlook, MorningBrief } from "../../services/types";
+import type { LivePick, MarketOutlook, MorningBrief, TradePlan } from "../../services/types";
 import Markdown from "../Chat/Markdown";
 
 interface MorningBriefBarProps {
@@ -7,6 +7,20 @@ interface MorningBriefBarProps {
   outlook: MarketOutlook | null;
   loading: boolean;
   onSelect: (symbol: string) => void;
+  /** The pick's current price/rank/action, so the 08:30 snapshot is never mistaken for the live view. */
+  live?: LivePick | null;
+}
+
+/** Compare the morning plan with the current price. */
+function liveStatus(plan: TradePlan, live: LivePick): { text: string; tone: string } {
+  const p = live.price;
+  if (p === null) return { text: "no live price", tone: "text-slate-500" };
+  if (p <= plan.stop_loss) return { text: `below the ₹${plan.stop_loss.toLocaleString("en-IN")} stop — morning plan invalid`, tone: "text-neon-rose" };
+  if (p >= plan.target) return { text: "target reached", tone: "text-neon-emerald" };
+  if (live.action && live.action !== plan.action) return { text: `now ${live.action} — morning plan no longer stands`, tone: "text-amber-300" };
+  if (p > plan.entry_high) return { text: "above the entry zone — don't chase", tone: "text-amber-300" };
+  if (p < plan.entry_low) return { text: "below the entry zone, still above the stop", tone: "text-amber-300" };
+  return { text: "inside the entry zone", tone: "text-neon-emerald" };
 }
 
 const REGIME_STYLES: Record<string, string> = {
@@ -54,7 +68,7 @@ function OutlookDetails({ outlook }: { outlook: MarketOutlook }) {
   );
 }
 
-export default function MorningBriefBar({ brief, outlook, loading, onSelect }: MorningBriefBarProps) {
+export default function MorningBriefBar({ brief, outlook, loading, onSelect, live }: MorningBriefBarProps) {
   const [open, setOpen] = useState(false);
 
   if (!brief) {
@@ -72,8 +86,9 @@ export default function MorningBriefBar({ brief, outlook, loading, onSelect }: M
   return (
     <>
       <div className="glass-panel px-4 py-2 flex items-center gap-3 border-neon-emerald/15 min-w-0">
-        <span className="pill bg-neon-emerald/10 text-neon-emerald border border-neon-emerald/30 shrink-0">
-          Morning Pick
+        <span className="pill bg-neon-emerald/10 text-neon-emerald border border-neon-emerald/30 shrink-0"
+          title={`Chosen at ${generated.toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" })} — the live status follows it`}>
+          Morning Pick · {generated.toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" })}
         </span>
         {plan ? (
           <button
@@ -87,6 +102,20 @@ export default function MorningBriefBar({ brief, outlook, loading, onSelect }: M
               {plan.entry_high.toLocaleString("en-IN")} · target ₹{plan.target.toLocaleString("en-IN")} · stop ₹
               {plan.stop_loss.toLocaleString("en-IN")} · 1:{plan.risk_reward.toFixed(1)}
             </span>
+            {live && (() => {
+              const st = liveStatus(plan, live);
+              return (
+                <span className="text-xs shrink-0 whitespace-nowrap">
+                  <span className="text-slate-500">· now </span>
+                  <span className="font-mono text-slate-300">₹{live.price?.toLocaleString("en-IN") ?? "—"}</span>
+                  {live.change_pct !== null && (
+                    <span className={live.change_pct >= 0 ? "text-neon-emerald" : "text-neon-rose"}> ({live.change_pct >= 0 ? "+" : ""}{live.change_pct.toFixed(1)}%)</span>
+                  )}
+                  {live.rank !== null && <span className="text-slate-500"> · #{live.rank}</span>}
+                  <span className={st.tone}> · {st.text}</span>
+                </span>
+              );
+            })()}
           </button>
         ) : (
           <span className="text-xs text-slate-400 truncate">No stock meets the buy criteria today — standing aside is a position too.</span>

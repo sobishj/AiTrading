@@ -100,6 +100,7 @@ export interface TradePlan {
   exit_logic: string;
   recommendation_id: number | null;
   generated_at: string;
+  first_recommended_at?: string | null;
   market_regime: MarketRegime;
   quantity: number;
   capital_required: number;
@@ -133,6 +134,7 @@ export interface AIForecast {
   reason: string | null;
   horizon_days: number;
   lessons_version: number;
+  model?: string | null;
 }
 
 export interface AINewsRead {
@@ -308,12 +310,31 @@ export interface TradeUploadResult {
   recalibration: { status: string; sample_size: number } | null;
 }
 
+export interface TradeProposalAction {
+  side: "BUY" | "SELL";
+  quantity: number | null;
+  price: number;
+  trade_date: string;
+  price_check: { day_low: number; day_high: number } | null;
+}
+
+/** A trade you reported in chat, checked against real prices, waiting for your confirmation. */
+export interface TradeProposal {
+  symbol: string | null;
+  name: string | null;
+  held_quantity: number | null;
+  actions: TradeProposalAction[];
+  warnings: string[];
+  needs: string[];
+}
+
 export interface ChatMessage {
   id: string;
   role: "user" | "assistant";
   content: string;
   timestamp: string;
   stockContext?: string | null;
+  tradeProposal?: TradeProposal | null;
 }
 
 export interface ChatResponse {
@@ -322,6 +343,7 @@ export interface ChatResponse {
   ai_response: string;
   stock_context: string | null;
   timestamp: string;
+  trade_proposal?: TradeProposal | null;
 }
 
 export interface IndexQuote {
@@ -342,6 +364,14 @@ export interface MarketContext {
   indices: IndexQuote[];
   nifty: { price: number | null; change_pct: number | null; trend: string; return_20d: number | null } | null;
   headlines: string[];
+}
+
+/** Where the morning pick stands right now (from the live ranking). */
+export interface LivePick {
+  price: number | null;
+  change_pct: number | null;
+  rank: number | null;
+  action: string | null;
 }
 
 export interface MorningBrief {
@@ -513,6 +543,12 @@ export interface Position {
   last_checked_at: string | null;
   unread_alerts: number;
   transactions: PositionTransaction[];
+  sold_quantity?: number;
+  avg_sell_price?: number | null;
+  avg_buy_price_sold?: number | null;
+  realized_pct?: number | null;
+  last_sold_on?: string | null;
+  closed_at?: string | null;
 }
 
 export type AlertKind = "stop_hit" | "near_stop" | "target_hit" | "near_target" | "trail_stop" | "loss_risk";
@@ -573,6 +609,21 @@ export interface LLMProfile {
   output_price: number | null;
   is_local: boolean;
   key_storage: "none" | "credential_manager" | "environment" | "database";
+}
+
+/** What the app can truthfully say about a model's credit (GET /llm/credit). */
+export interface ModelCredit {
+  profile_id: number;
+  /** local = free; balance = live prepaid balance; credit_ok / no_credit = seen on the last real call;
+   *  unknown = paid, provider has no balance API and no call yet; error = balance API failed. */
+  status: "local" | "balance" | "credit_ok" | "no_credit" | "unknown" | "error";
+  label: string;
+  amount?: number;
+  currency?: string;
+  message?: string;
+  note?: string;
+  checked_at?: string | null;
+  error?: string;
 }
 
 export interface LLMPreset {
@@ -764,4 +815,34 @@ export interface ModelPresets {
   builtin: { key: string; name: string; description: string; enabled: string[] }[];
   saved: { id: number; name: string }[];
   current: { mode: "single" | "multi"; enabled: number[] };
+}
+
+export interface TradingStyle {
+  updated_at?: string;
+  stats: {
+    entries: number;
+    closed_trades?: number;
+    open_positions?: number;
+    win_rate?: number | null;
+    avg_win_pct?: number | null;
+    avg_loss_pct?: number | null;
+    payoff_ratio?: number | null;
+    expectancy_pct?: number | null;
+    avg_hold_days_winners?: number | null;
+    avg_hold_days_losers?: number | null;
+    typical_position_inr?: number | null;
+    worst_trade_pct?: number | null;
+    sectors?: [string, number][];
+    followed_ai?: { n: number; avg_10d_pct: number | null };
+    against_ai?: { n: number; avg_10d_pct: number | null };
+    early_exits?: { n: number; of: number };
+  };
+  style_notes: string[];
+  entries: {
+    symbol: string; day: string; price: number; quantity: number; factors: string[]; style: string[];
+    rsi: number | null; ret_5d_before: number | null; fwd: Record<string, number>; ai_view: string | null;
+    ai_alignment: string | null;
+  }[];
+  exits: { symbol: string; day: string; price: number; quantity: number; pnl_pct: number | null;
+    holding_days: number | null; after_10d_pct: number | null }[];
 }

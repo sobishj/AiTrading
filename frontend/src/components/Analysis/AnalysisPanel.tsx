@@ -67,7 +67,7 @@ function AIViewSection({ view }: { view: AIView }) {
   const tone = !f ? "" : f.direction === "up" ? "text-neon-emerald" : f.direction === "down" ? "text-neon-rose" : "text-slate-300";
   const o = view.outlook;
   return (
-    <Section title="AI analyst (Qwen)">
+    <Section title="AI analyst (background model)">
       {o && (
         <p className="text-xs text-slate-400 mb-1">
           Next session ({o.session_date}): market {o.bias}, {o.probability_up.toFixed(0)}% chance NIFTY closes higher.
@@ -89,12 +89,12 @@ function AIViewSection({ view }: { view: AIView }) {
             </span>{" "}
             over {f.horizon_days} trading days
             {f.expected_move_pct !== null && ` (expects ${f.expected_move_pct > 0 ? "+" : ""}${f.expected_move_pct.toFixed(1)}%)`}
-            <span className="text-slate-500"> · forecast {f.date}, lessons v{f.lessons_version}</span>
+            <span className="text-slate-500"> · forecast {f.date}{f.model ? ` by ${f.model}` : ""}, lessons v{f.lessons_version}</span>
           </p>
           {f.reason && <p className="text-slate-400">{f.reason}</p>}
         </div>
       ) : (
-        <p className="text-xs text-slate-500">No forecast for this stock yet — Qwen forecasts the top 10 and your Manual list each weekday morning.</p>
+        <p className="text-xs text-slate-500">No forecast for this stock yet — the background model forecasts the top 10 and your Manual list each weekday morning.</p>
       )}
       {view.news_reads.length > 0 && (
         <ul className="space-y-0.5 mt-1">

@@ -72,8 +72,17 @@ export default function TradePlanCard({ symbol, refreshKey, position, onPosition
           )}
 
           <p className="text-xs text-slate-300 leading-relaxed">{current.reasoning}</p>
+          {current.first_recommended_at && current.first_recommended_at.slice(0, 10) !== current.generated_at.slice(0, 10) && (
+            <p className="text-[11px] text-slate-500">
+              First recommended {new Date(current.first_recommended_at + (current.first_recommended_at.endsWith("Z") ? "" : "Z")).toLocaleDateString("en-IN", { day: "numeric", month: "short" })}
+              {" "}— levels and reasons above are re-checked against today's price.
+            </p>
+          )}
           {current.ai_commentary && (
             <p className="text-xs text-slate-400 leading-relaxed border-l-2 border-neon-purple/40 pl-3">
+              {current.first_recommended_at && current.first_recommended_at.slice(0, 10) !== current.generated_at.slice(0, 10) && (
+                <span className="text-slate-500">AI note from when first recommended: </span>
+              )}
               {current.ai_commentary}
             </p>
           )}

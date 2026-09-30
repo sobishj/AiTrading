@@ -512,3 +512,13 @@ class PatternStat(Base):
     last_observed: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
     __table_args__ = (UniqueConstraint("pattern", "bias", "regime", "timeframe", "source", name="uq_pattern_stat"),)
+
+
+class TraderProfile(Base):
+    """Your trading style, measured from your recorded trades (trader_profile_service.py). Single row."""
+    __tablename__ = "trader_profiles"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    profile_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    trades_analyzed: Mapped[int] = mapped_column(Integer, default=0)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)

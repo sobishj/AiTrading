@@ -17,7 +17,7 @@ import httpx
 import pandas as pd
 
 from config import settings
-from data_provider import empty_candles, yahoo_provider
+from data_provider import clean_daily_candles, empty_candles, yahoo_provider
 from kite_service import kite_service
 from utils.decorators import async_retry
 from utils.logger import get_logger
@@ -185,7 +185,8 @@ class MarketService:
         )
         if not raw:
             return empty_candles()
-        return pd.DataFrame(raw)
+        frame = pd.DataFrame(raw)
+        return clean_daily_candles(frame, str(instrument_token)) if interval == "day" else frame
 
     def _resolve_instrument_token(self, symbol: str) -> Optional[int]:
         """Resolve an NSE trading symbol to its Kite instrument_token (cached ~1h)."""
@@ -427,11 +428,15 @@ class MarketService:
         if fii_dii.get("fii_activity") is not None:
             parts.append(f"FII net ₹{fii_dii['fii_activity']:,.0f} cr, DII net ₹{fii_dii['dii_activity']:,.0f} cr"
                          f" ({fii_dii.get('date')}).")
+        # Only state what the data and the engine's rules support (see scripts/evaluate_ranking.py).
         parts.append({
-            "risk-on": "Regime: risk-on — breakouts and momentum setups have tailwind.",
-            "neutral": "Regime: neutral — be selective, favour stocks showing relative strength.",
-            "risk-off": "Regime: risk-off — fresh longs carry extra risk; size down and favour strongest relative performers.",
+            "risk-on": "Regime: risk-on (NIFTY in an uptrend, VIX calm).",
+            "neutral": "Regime: neutral.",
+            "risk-off": "Regime: risk-off — fresh longs carry extra risk; size down.",
         }[regime])
+        if nifty.ema_50 is not None and nifty.close < nifty.ema_50:
+            parts.append(f"NIFTY is below its 50-day EMA ({nifty.ema_50:,.0f}), so the engine makes no new BUY calls "
+                         "until it recovers.")
         return " ".join(parts)
 
     # ------------------------------------------------------------------

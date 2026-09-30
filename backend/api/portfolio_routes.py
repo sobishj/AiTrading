@@ -2,6 +2,7 @@
 Holdings API: record buys/sells, edit stop-loss/target, list holdings with
 live risk, and the alerts the monitor raises.
 """
+import asyncio
 from datetime import date
 from typing import Literal, Optional
 
@@ -18,6 +19,15 @@ from ranking_service import ranking_service
 from utils.validators import validate_symbol
 
 router = APIRouter()
+_learning_tasks: set = set()
+
+
+def _learn_from_trades() -> None:
+    """Re-analyse your trading style after any recorded trade (background; never blocks or fails the trade)."""
+    from trader_profile_service import refresh_in_background
+    task = asyncio.create_task(refresh_in_background())
+    _learning_tasks.add(task)
+    task.add_done_callback(_learning_tasks.discard)
 
 
 class BuyRequest(BaseModel):
@@ -116,6 +126,7 @@ async def buy(payload: BuyRequest, db: Session = Depends(get_db)):
     position = position_service.buy(db, stock, payload.quantity, float(price), payload.trade_date or date.today(),
                                     stop, target, payload.notes)
     await run_position_monitor()   # assess it right away
+    _learn_from_trades()
     db.refresh(position)
     return position_service.to_payload(position)
 
@@ -147,6 +158,7 @@ async def sell(position_id: int, payload: SellRequest, db: Session = Depends(get
         position_service.sell(db, position, payload.quantity, payload.price, payload.trade_date or date.today())
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    _learn_from_trades()
     db.refresh(position)
     return position_service.to_payload(position)
 
@@ -162,6 +174,7 @@ async def edit_transaction(position_id: int, tx_id: int, payload: TransactionUpd
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    _learn_from_trades()
     await run_position_monitor()
     db.refresh(position)
     return position_service.to_payload(position)
@@ -178,6 +191,7 @@ async def delete_transaction(position_id: int, tx_id: int, db: Session = Depends
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    _learn_from_trades()
     if not still_exists:
         return None
     await run_position_monitor()
@@ -200,6 +214,7 @@ async def get_position(position_id: int, db: Session = Depends(get_db)):
 async def delete_position(position_id: int, db: Session = Depends(get_db)):
     """Delete a holding entered by mistake (also removes its learning rows)."""
     position_service.delete(db, _get_position(db, position_id))
+    _learn_from_trades()
 
 
 @router.post("/positions/check-now")
@@ -228,3 +243,102 @@ async def acknowledge_alerts(payload: AckRequest, db: Session = Depends(get_db))
     count = query.update({PositionAlert.acknowledged: True}, synchronize_session=False)
     db.commit()
     return {"acknowledged": count}
+
+
+# ----------------------------------------------------------------------
+# Trades reported in chat ("I bought 10 at 265 and sold at 280") and your trading style
+# ----------------------------------------------------------------------
+class TradeActionIn(BaseModel):
+    side: Literal["BUY", "SELL"]
+    quantity: float = Field(..., gt=0)
+    price: float = Field(..., gt=0)
+    trade_date: Optional[date] = None
+
+
+class RecordTradesRequest(BaseModel):
+    symbol: str = Field(..., min_length=1, max_length=20)
+    actions: list[TradeActionIn] = Field(..., min_length=1, max_length=10)
+
+
+async def build_trade_proposal(db: Session, intent, symbol: Optional[str]) -> dict:
+    """
+    What a chat message reported, checked against real data, for you to confirm. Nothing is saved here.
+    Prices are compared with that day's actual trading range; missing quantities stay empty.
+    """
+    import pandas as pd
+
+    warnings, needs = [], []
+    stock = db.query(Stock).filter(Stock.symbol == symbol).first() if symbol else None
+    if stock is None:
+        needs.append("symbol")
+    held = None
+    if stock is not None:
+        pos = db.query(Position).filter(Position.stock_id == stock.id, Position.status == "open").first()
+        held = float(pos.quantity) if pos else 0.0
+    candles = None
+    if stock is not None:
+        oldest = min((a.trade_date for a in intent.actions if a.trade_date), default=date.today())
+        try:
+            candles = await market_service.get_candles_for_symbol(stock.symbol, days=(date.today() - oldest).days + 10)
+        except Exception:  # noqa: BLE001
+            candles = None
+    actions = []
+    running = held or 0.0
+    for a in intent.actions:
+        day = a.trade_date or date.today()
+        check = None
+        if candles is not None and not candles.empty and "date" in candles.columns:
+            dates = pd.to_datetime(candles["date"]).dt.date
+            rows = candles[dates == day]
+            if not rows.empty:
+                low, high = float(rows.iloc[-1]["low"]), float(rows.iloc[-1]["high"])
+                check = {"day_low": round(low, 2), "day_high": round(high, 2)}
+                if not (low * 0.97 <= a.price <= high * 1.03):
+                    warnings.append(f"Rs {a.price:g} is outside {stock.symbol}'s actual range on {day:%d %b} "
+                                    f"(Rs {low:.2f} to {high:.2f}) - check the price or the stock.")
+            else:
+                warnings.append(f"No trading data for {stock.symbol} on {day:%d %b} (holiday or weekend?) - check the date.")
+        if a.quantity is None:
+            needs.append(f"quantity for the {a.side.lower()}")
+        if a.side == "BUY":
+            running += a.quantity or 0
+        elif stock is not None and running == 0:
+            warnings.append(f"No recorded holding of {stock.symbol} to sell - add the buy too.")
+        elif stock is not None and a.quantity is not None and a.quantity > running:
+            warnings.append(f"Selling {a.quantity:g} but only {running:g} {stock.symbol} recorded as held.")
+        actions.append({"side": a.side, "quantity": a.quantity, "price": a.price, "trade_date": day.isoformat(),
+                        "price_check": check})
+    return {"symbol": stock.symbol if stock else None, "name": stock.name if stock else None,
+            "held_quantity": held, "actions": actions, "warnings": warnings, "needs": needs}
+
+
+@router.post("/trades/record")
+async def record_trades(payload: RecordTradesRequest, db: Session = Depends(get_db)):
+    """Record trades you confirmed from chat, in order (e.g. a buy then a sale), exactly like the Holdings buttons."""
+    symbol = validate_symbol(payload.symbol)
+    recorded, result = [], None
+    for a in payload.actions:
+        if a.side == "BUY":
+            result = await buy(BuyRequest(symbol=symbol, quantity=a.quantity, price=a.price, trade_date=a.trade_date), db)
+        else:
+            pos = (db.query(Position).join(Stock)
+                   .filter(Stock.symbol == symbol, Position.status == "open").first())
+            if pos is None:
+                raise HTTPException(status_code=409, detail=f"No open holding of {symbol} to sell - record the buy first")
+            result = await sell(pos.id, SellRequest(quantity=a.quantity, price=a.price, trade_date=a.trade_date), db)
+        recorded.append({"side": a.side, "quantity": a.quantity, "price": a.price,
+                         "trade_date": (a.trade_date or date.today()).isoformat()})
+    return {"symbol": symbol, "recorded": recorded, "position": result}
+
+
+@router.get("/profile/trading-style")
+async def trading_style(db: Session = Depends(get_db)):
+    """Your trading style measured from your recorded trades (buys, sells, and Zerodha uploads)."""
+    from trader_profile_service import trader_profile_service
+    return trader_profile_service.get(db) or {"stats": {"entries": 0}, "style_notes": [], "entries": [], "exits": []}
+
+
+@router.post("/profile/trading-style/refresh")
+async def refresh_trading_style(db: Session = Depends(get_db)):
+    from trader_profile_service import trader_profile_service
+    return await trader_profile_service.refresh(db)

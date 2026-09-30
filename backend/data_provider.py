@@ -50,6 +50,48 @@ def empty_candles() -> pd.DataFrame:
     return pd.DataFrame(columns=CANDLE_COLUMNS)
 
 
+# An overnight gap beyond these bounds (open vs previous close) is a corporate
+# action (split, bonus, demerger), not trading: the NIFTY-50 names' largest real
+# gaps since 2019 were about -17% (March 2020), while Yahoo left e.g. Trent's
+# 2026 3:2 adjustment (-33%) and the Tata Motors demerger (-40%) unadjusted.
+CORPORATE_ACTION_GAP = (0.75, 1.33)
+_logged_adjustments: set[tuple[str, str]] = set()
+
+
+def clean_daily_candles(frame: pd.DataFrame, symbol: str = "") -> pd.DataFrame:
+    """
+    Make daily candles fit for analysis:
+    - drop placeholder bars (zero volume, open = high = low = close) that feeds
+      insert for holidays and missing data; a fake flat bar distorts ATR, RSI
+      and volume averages;
+    - back-adjust prices (and volumes) before an unadjusted corporate action by
+      the gap ratio, so indicators, 52-week levels and momentum see one
+      continuous series.
+    """
+    if frame is None or frame.empty or not {"open", "high", "low", "close", "volume"} <= set(frame.columns):
+        return frame
+    df = frame.copy()
+    volume = df["volume"].fillna(0)
+    flat = (df["open"] == df["high"]) & (df["high"] == df["low"]) & (df["low"] == df["close"])
+    df = df[~((volume == 0) & flat)].reset_index(drop=True)
+    if len(df) < 2:
+        return df
+
+    ratio = df["open"] / df["close"].shift(1)
+    low, high = CORPORATE_ACTION_GAP
+    for i in df.index[(ratio < low) | (ratio > high)]:
+        factor = float(ratio[i])
+        for col in ("open", "high", "low", "close"):
+            df.loc[: i - 1, col] = df.loc[: i - 1, col] * factor
+        df.loc[: i - 1, "volume"] = (df.loc[: i - 1, "volume"] / factor).round()
+        when = str(df["date"].iloc[i])[:10] if "date" in df.columns else str(i)
+        if (symbol, when) not in _logged_adjustments:
+            _logged_adjustments.add((symbol, when))
+            logger.info("Back-adjusted %s history for a corporate action on %s (factor %.4f)", symbol, when, factor)
+    df["volume"] = df["volume"].astype("int64")
+    return df
+
+
 def to_yahoo_symbol(symbol: str) -> str:
     symbol = symbol.strip().upper()
     if symbol.startswith("^") or "=" in symbol or "." in symbol:
@@ -110,6 +152,8 @@ class YahooProvider:
             if not result:
                 return empty_candles(), {}
             frame, meta = self._parse(result[0])
+            if yahoo_interval == "1d":
+                frame = clean_daily_candles(frame, symbol)
         except Exception as exc:  # noqa: BLE001
             logger.warning("Yahoo chart fetch failed for %s: %s", symbol, exc)
             return empty_candles(), {}

@@ -28,9 +28,11 @@ from database import db_session
 from evidence_engine import (ALL_CLAIM_KEYS, check_levels, enrich_facts, parse_claims, present_factors, verify)
 from knowledge_service import knowledge_service
 from llm_providers import ProviderConfig, ProviderError, build_provider
+from llm_service import llm_service
 from models import AIConsensus, AIPrediction, AppSettings, LLMProfile, LLMUsage, ResearchContext
 from prompts.prompt_library import PromptLibrary
 from research_context import build_package, render
+from trader_profile_service import trader_profile_service
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -260,13 +262,15 @@ class AIOrchestrator:
                               output_tokens=reply.output_tokens, latency_ms=int((time.monotonic() - started) * 1000),
                               error=None if reply.text else "empty answer")
                 self.record_usage(profile.id, bool(reply.text), reply.input_tokens, reply.output_tokens)
+                llm_service.note_credit(profile.id)
                 return result
             except asyncio.TimeoutError:
                 result["error"] = f"timed out after {profile.timeout:.0f}s"
                 retry = False
             except ProviderError as exc:
                 result["error"] = exc.message
-                retry = exc.retryable and "rate limit" not in exc.message.lower()
+                llm_service.note_credit(profile.id, exc)
+                retry = exc.retryable and "rate limit" not in exc.message.lower() and not exc.no_credit
             except Exception as exc:  # noqa: BLE001  (isolate anything unexpected; never echo request data)
                 result["error"] = f"unexpected {exc.__class__.__name__}"
                 retry = False
@@ -310,7 +314,7 @@ class AIOrchestrator:
         prompt = PromptLibrary.structured_analysis(
             name=item.name, symbol=item.symbol, horizon=HORIZON_DAYS, collected_at=package.collected_at,
             data_source=package.data_source, context=render(package), knowledge=knowledge,
-            claim_keys=", ".join(ALL_CLAIM_KEYS))
+            trader=trader_profile_service.block(db, item.symbol), claim_keys=", ".join(ALL_CLAIM_KEYS))
         ctx = ResearchContext(stock_id=item.stock_id, content_hash=content_hash,
                               context_json=json.dumps(package.to_json(), default=str), prompt_text=prompt,
                               data_timestamp=_parse_ts(package.data_timestamp))
@@ -429,6 +433,56 @@ class AIOrchestrator:
         logger.info("AI analysis %s: %s (%s), %d model(s), %d failed", item.symbol, result.signal,
                     result.vote_text, len(members), len(failed))
         return self.payload(db, consensus)
+
+    def rescore(self, db: Session, consensus_id: int) -> Optional[dict]:
+        """
+        Recompute a stored run's consensus from the models' saved answers and evidence checks
+        (no model is called again) — used after the combination rules change.
+        """
+        c = db.get(AIConsensus, consensus_id)
+        ctx = db.get(ResearchContext, c.context_id) if c and c.context_id else None
+        rows = (db.query(AIPrediction).filter(AIPrediction.consensus_id == consensus_id,
+                                              AIPrediction.role == "member").all()) if c else []
+        if c is None or ctx is None or not rows:
+            return None
+        package = json.loads(ctx.context_json)
+        facts = package.get("facts", {})
+        regimes = facts.get("regimes") or []
+        regime = regimes[0] if regimes else None
+        strategy = rows[0].strategy
+        members = []
+        for p in rows:
+            a = json.loads(p.analysis_json) if p.analysis_json else {}
+            members.append({**a, "model": p.model, "profile_id": p.profile_id,
+                            "recommendation": p.recommendation, "probability_up": float(p.probability_up),
+                            "reliability_stats": knowledge_service.model_reliability(db, p.profile_id, regime, strategy)})
+        result = combine(members, knowledge_service.factor_stats_for(db, present_factors(facts), regime), facts,
+                         package.get("engine"))
+        weights = {m["profile_id"]: m for m in result.members}
+        for p in rows:
+            a = json.loads(p.analysis_json) if p.analysis_json else {}
+            w = weights.get(p.profile_id, {})
+            a.update(weight=w.get("weight"), reliability_why=w.get("reliability_why"), evidence_why=w.get("evidence_why"))
+            p.analysis_json = json.dumps(a)
+        scores = json.loads(c.scores_json)
+        c.signal, c.probability_up, c.confidence = result.signal, result.probability_up, result.confidence
+        c.scores_json = json.dumps({**result.scores, "members": result.members, "vote_text": result.vote_text,
+                                    "profile_ids": scores.get("profile_ids", [])})
+        c.levels_json = json.dumps(result.levels)
+        c.reasoning_json = json.dumps({"reasoning": result.reasoning, "evidence_for": result.evidence_for,
+                                       "risks": result.risks, "historical": result.historical})
+        c.disagreement_json = json.dumps(result.disagreement)
+        cons_row = (db.query(AIPrediction).filter(AIPrediction.consensus_id == consensus_id,
+                                                  AIPrediction.model == "consensus").first())
+        if cons_row is not None and cons_row.graded_at is None:
+            prob = result.probability_up
+            cons_row.direction = "up" if prob > 55 else "down" if prob < 45 else "flat"
+            cons_row.probability_up, cons_row.recommendation, cons_row.confidence = prob, result.signal, result.confidence
+            cons_row.entry, cons_row.target, cons_row.stop_loss = (result.levels.get("entry"), result.levels.get("target"),
+                                                                   result.levels.get("stop_loss"))
+            cons_row.evidence_score = round(result.scores["evidence_support"] / 100, 3)
+        db.commit()
+        return self.payload(db, c)
 
     # ------------------------------------------------------------------
     # Read side

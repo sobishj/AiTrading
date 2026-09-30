@@ -146,6 +146,9 @@ STRUCTURED_ANALYSIS_PROMPT = """You are one of several independent analysts revi
 KNOWLEDGE (graded past analyses are opinions labelled with their source model and what actually happened; factor statistics are measured outcomes — neither overrides the data above):
 {knowledge}
 
+THE TRADER you are advising (measured from their own recorded trades). Use this only to tailor ENTRY, TARGET, STOP_LOSS, TIMEFRAME and RISKS to how they trade (e.g. warn a trader who sells early, size the stop to their habits); it must not change PROBABILITY_UP, the RECOMMENDATION evidence, or your claims about the data:
+{trader}
+
 Reply with exactly these lines and nothing else:
 RECOMMENDATION: BUY or HOLD or SELL or AVOID
 DIRECTION: up or down or flat

@@ -9,6 +9,13 @@ interface StockListItemProps {
   onRemove?: (symbol: string) => void;
 }
 
+// Same colours as the trade plan's action badge.
+const ACTION_BADGE: Record<string, string> = {
+  BUY: "text-neon-emerald bg-neon-emerald/10 border-neon-emerald/40",
+  WAIT: "text-amber-300 bg-amber-300/10 border-amber-300/30",
+  AVOID: "text-neon-rose bg-neon-rose/10 border-neon-rose/30",
+};
+
 export default function StockListItem({ stock, selected, moved, onSelect, onRemove }: StockListItemProps) {
   const moveClass = moved === "up" ? "rank-flash-up" : moved === "down" ? "rank-flash-down" : "";
 
@@ -23,11 +30,19 @@ export default function StockListItem({ stock, selected, moved, onSelect, onRemo
       <button
         onClick={() => onSelect(stock.symbol)}
         title={stock.change_reason ?? `${stock.name} (NSE:${stock.symbol})`}
-        className="flex-1 min-w-0 text-left px-3.5 py-2"
+        className="flex-1 min-w-0 flex items-center gap-2 text-left px-3.5 py-2"
       >
-        <span className={`block truncate text-sm font-medium ${selected ? "text-neon-blue" : "text-slate-200"}`}>
+        <span className={`flex-1 truncate text-sm font-medium ${selected ? "text-neon-blue" : "text-slate-200"}`}>
           {stock.name}
         </span>
+        {stock.action && (
+          <span
+            className={`shrink-0 rounded border px-1.5 py-px text-[10px] font-semibold tracking-wide ${ACTION_BADGE[stock.action] ?? ""}`}
+            title={stock.conviction_score !== null ? `${stock.action} · conviction ${stock.conviction_score.toFixed(0)}/100` : stock.action}
+          >
+            {stock.action}
+          </span>
+        )}
       </button>
       {onRemove && (
         <button

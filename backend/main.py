@@ -328,6 +328,8 @@ async def _daily_scheduler_loop() -> None:
                     await connection_manager.broadcast({"type": "learning_update", "graded": result["graded"]})
                     enqueue_ai_reflection()
                     asyncio.create_task(run_factor_study())
+                    from trader_profile_service import refresh_in_background
+                    asyncio.create_task(refresh_in_background())   # after-the-fact outcomes of your own trades
                     last_learning_date = now.date()
         except asyncio.CancelledError:
             raise

@@ -55,6 +55,9 @@ ALL_STRATEGIES = [BREAKOUT, EARNINGS_MOMENTUM, GAP_UP, PULLBACK, MOMENTUM, SECTO
 # stop capped at PLAN_MAX_STOP_ATR, a 2R target is ~3 ATR — the same shape the
 # historical back-test measures, so its win rate is evidence for this plan.
 PLAN_MAX_STOP_ATR = 1.5
+# A BUY needs a setup, both of these, and NIFTY above its EMA 50.
+BUY_MIN_TECHNICAL = 55.0
+BUY_MIN_CONVICTION = 55.0
 STRATEGY_PROFILE: dict[str, tuple[float, str]] = {
     BREAKOUT: (2.0, "3-10 trading days"),
     GAP_UP: (1.5, "1-3 trading days"),
@@ -121,6 +124,11 @@ class TechnicalSnapshot:
     vwap_20: Optional[float] = None       # 20-day VWAP from daily bars (typical price x volume), not intraday VWAP
     breakout: bool = False                # close above the prior 20-day high on >= 1.3x volume
     breakdown: bool = False               # close below the prior 20-day low on >= 1.3x volume
+    # --- timing inputs (see timing_score) ---
+    rsi_2: Optional[float] = None
+    return_5d: Optional[float] = None
+    momentum_12_1: Optional[float] = None  # 12-month return excluding the latest month
+    bar_progress: float = 1.0              # share of the session elapsed for the last bar (1.0 = closed)
     setups: list[str] = field(default_factory=list)
     trend: str = "unknown"
     score_breakdown: dict = field(default_factory=dict)
@@ -147,6 +155,10 @@ class TradePlan:
     risk_level: str        # low / medium / high
     invalidation: str
     exit_logic: str
+    # Why the action is what it is: every BUY condition that failed (WAIT) or
+    # the AVOID trigger, straight from the decision rule, so explanations can't
+    # drift from the logic. Empty for BUY.
+    reasons: list[str] = field(default_factory=list)
 
     @property
     def entry_mid(self) -> float:
@@ -184,6 +196,55 @@ def session_fraction(bar_time: Optional[pd.Timestamp], now: Optional[datetime] =
     if elapsed >= SESSION_MINUTES:
         return 1.0
     return max(0.1, elapsed / SESSION_MINUTES)
+
+
+# Typical share of a full NSE session's volume traded by each point of the
+# session (elapsed fraction -> cumulative volume share). Intraday volume is
+# U-shaped: the first 15 minutes alone carry ~10%, so projecting early volume
+# linearly by elapsed time overstated it by up to 3-10x and fired spurious
+# volume-confirmed setups (e.g. a "Breakout" at 9:20).
+_VOLUME_CURVE_X = [0.0, 0.04, 0.16, 0.50, 0.84, 1.0]
+_VOLUME_CURVE_Y = [0.0, 0.10, 0.25, 0.52, 0.74, 1.0]
+# Before this fraction of volume has traded, a projection is too noisy to trust.
+MIN_VOLUME_SHARE = 0.10
+
+
+# Entry timing. A walk-forward replay of this engine on the NIFTY-50 universe
+# (2019-2026, scripts/evaluate_ranking.py) found that at a 5-10 day horizon
+# large caps mean-revert: a big 5-day gain, a high 2-day RSI or a strong day
+# predicted *under*performance vs NIFTY, while 12-1 month momentum predicted
+# outperformance — in both 2020-23 and the held-out 2024-26. The raw technical
+# score, which rewards short-term strength, had no edge on its own.
+# Each input is scaled by its median / interquartile range on 2020-23 data.
+TIMING_SCALES = {
+    "momentum_12_1": (18.0, 44.0),
+    "return_5d": (0.5, 4.5),
+    "rsi_2": (56.0, 57.0),
+    "change_pct": (0.0, 1.9),
+}
+TIMING_SIGNS = {"momentum_12_1": 1.0, "return_5d": -1.0, "rsi_2": -1.0, "change_pct": -0.5}
+
+
+def timing_score(s: "TechnicalSnapshot") -> float:
+    """
+    Positive = a dip within a long-term uptrend (historically a better entry);
+    negative = short-term overextended (historically gives some back). Roughly
+    -7..+7; missing inputs count as neutral.
+    """
+    total = 0.0
+    for name, (median, iqr) in TIMING_SCALES.items():
+        value = getattr(s, name)
+        if value is not None:
+            total += TIMING_SIGNS[name] * max(-2.0, min(2.0, (value - median) / iqr))
+    return round(total, 3)
+
+
+def projected_volume_share(fraction: float) -> float:
+    """Expected share of full-day volume traded by `fraction` of the session (1.0 = closed bar)."""
+    if fraction >= 1.0:
+        return 1.0
+    share = float(np.interp(fraction, _VOLUME_CURVE_X, _VOLUME_CURVE_Y))
+    return max(MIN_VOLUME_SHARE, share)
 
 
 class AnalysisService:
@@ -234,6 +295,10 @@ class AnalysisService:
         df["low_52w"] = low.rolling(252, min_periods=20).min()
         df["return_20d"] = close.pct_change(20) * 100
         df["return_60d"] = close.pct_change(60) * 100
+        # Timing inputs (see timing_score).
+        df["rsi_2"] = RSIIndicator(close=close, window=2).rsi()
+        df["return_5d"] = close.pct_change(5) * 100
+        df["momentum_12_1"] = (close.shift(21) / close.shift(252) - 1) * 100
         return df
 
     @staticmethod
@@ -273,23 +338,42 @@ class AnalysisService:
 
         df = self.indicator_frame(candles)
         last = df.iloc[-1]
-        prev = df.iloc[-2]
 
         bar_time = None
         if "date" in df.columns:
             bar_time = pd.Timestamp(last["date"])
         fraction = session_fraction(bar_time, now)
 
-        volume = int(last["volume"])
         avg_volume = _f(last["avg_volume_20"])
         # Project today's partial volume to a full-session equivalent.
-        volume_ratio = (volume / fraction / avg_volume) if avg_volume else None
+        volume_ratio = (int(last["volume"]) / projected_volume_share(fraction) / avg_volume) if avg_volume else None
 
         live_ratio = df["volume_ratio"].copy()
         if volume_ratio is not None:
             live_ratio.iloc[-1] = volume_ratio
         flags = self.setup_flags(df, live_ratio)
-        setups = [name for name in PRICE_SETUPS if bool(flags[name].iloc[-1])]
+        snap = self.snapshot_at(symbol, df, flags, len(df) - 1, benchmark_return_20d, volume_ratio)
+        snap.bar_progress = round(fraction, 3)
+        snap.backtest = self.backtest_setups(df, flags)
+        return snap
+
+    def snapshot_at(self, symbol: str, df: pd.DataFrame, flags: pd.DataFrame, i: int,
+                    benchmark_return_20d: Optional[float] = None,
+                    volume_ratio: Optional[float] = None) -> TechnicalSnapshot:
+        """
+        Snapshot (indicators, setups, score) as of bar `i` of an indicator
+        frame, using only bars up to `i`. The live path calls it for the last
+        bar; the walk-forward evaluator (scripts/evaluate_ranking.py) calls it
+        for every past bar, so both score with exactly the same code.
+        """
+        last = df.iloc[i]
+        prev = df.iloc[i - 1]
+        bar_time = pd.Timestamp(last["date"]) if "date" in df.columns else None
+        volume = int(last["volume"])
+        avg_volume = _f(last["avg_volume_20"])
+        if volume_ratio is None:
+            volume_ratio = _f(last["volume_ratio"])
+        setups = [name for name in PRICE_SETUPS if bool(flags[name].iloc[i])]
 
         close = float(last["close"])
         ema20, ema50, ema200 = _f(last["ema_20"]), _f(last["ema_50"]), _f(last["ema_200"])
@@ -332,6 +416,9 @@ class AnalysisService:
             sma_20=_f(last["sma_20"]),
             sma_50=_f(last["sma_50"]),
             vwap_20=_f(last["vwap_20"]),
+            rsi_2=_f(last["rsi_2"]),
+            return_5d=_f(last["return_5d"]),
+            momentum_12_1=_f(last["momentum_12_1"]),
         )
         prior_high, prior_low = _f(last["prior_high_20"]), _f(last["prior_low_20"])
         heavy = bool(volume_ratio is not None and volume_ratio >= 1.3)
@@ -339,7 +426,6 @@ class AnalysisService:
         snap.breakdown = bool(prior_low is not None and close < prior_low and heavy)
         snap.trend = self._trend(snap)
         self._score(snap, prev_hist=_f(prev["macd_hist"]))
-        snap.backtest = self.backtest_setups(df, flags)
         return snap
 
     @staticmethod
@@ -550,12 +636,15 @@ class AnalysisService:
     # Trade plan
     # ------------------------------------------------------------------
     def build_trade_plan(self, s: TechnicalSnapshot, strategy: str,
-                         conviction: float, market_regime: str = "neutral") -> Optional[TradePlan]:
+                         conviction: float, market_regime: str = "neutral",
+                         market_uptrend: bool = True) -> Optional[TradePlan]:
         """
         Entry zone around the current price (shaped by the setup), stop below
         the 10-day swing low but never more than 1.5 ATR from the entry
         midpoint, and a target at a fixed R-multiple per strategy. Long-only: NSE cash delivery can't be
         held short overnight, so bearish setups produce AVOID, not SELL.
+        `market_uptrend` False (NIFTY below its EMA 50) turns BUY into WAIT: in
+        the replay, long picks made then lagged NIFTY in both test periods.
         """
         if not s.has_data:
             return None
@@ -582,12 +671,23 @@ class AnalysisService:
         target = round_tick(entry_mid + reward_multiple * risk)
         risk_reward = round((target - entry_mid) / risk, 2) if risk > 0 else 0.0
 
+        reasons: list[str] = []
         if s.trend == "downtrend" or s.technical_score < 40:
             action = "AVOID"
-        elif strategy != NO_SETUP and s.technical_score >= 55 and conviction >= 55:
-            action = "BUY"
+            if s.trend == "downtrend":
+                reasons.append("the stock is in a downtrend (price below EMA 20, EMA 20 below EMA 50)")
+            if s.technical_score < 40:
+                reasons.append(f"technical score {s.technical_score:.0f}/100 is below 40")
         else:
-            action = "WAIT"
+            if strategy == NO_SETUP:
+                reasons.append("no entry setup has triggered yet")
+            if s.technical_score < BUY_MIN_TECHNICAL:
+                reasons.append(f"technical score {s.technical_score:.0f}/100 is below {BUY_MIN_TECHNICAL:.0f}")
+            if conviction < BUY_MIN_CONVICTION:
+                reasons.append(f"conviction {conviction:.0f}/100 is below {BUY_MIN_CONVICTION:.0f}")
+            if not market_uptrend:
+                reasons.append("NIFTY is below its 50-day EMA, so no new longs")
+            action = "WAIT" if reasons else "BUY"
 
         levels = ["low", "medium", "high"]
         level = 1
@@ -614,7 +714,7 @@ class AnalysisService:
             action=action, instrument="Cash Stock (NSE)", strategy=strategy,
             entry_low=entry_low, entry_high=entry_high, stop_loss=stop, target=target,
             risk_reward=risk_reward, holding_period=holding, risk_level=levels[level],
-            invalidation=invalidation, exit_logic=exit_logic,
+            invalidation=invalidation, exit_logic=exit_logic, reasons=reasons,
         )
 
     @staticmethod

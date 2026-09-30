@@ -19,6 +19,7 @@ its fallback immediately.
 """
 import asyncio
 import hashlib
+import re
 import time
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
@@ -41,7 +42,37 @@ IST = timezone(timedelta(hours=5, minutes=30))
 ROLES = ("chat", "background")
 
 # Re-exported for callers/tests that import it from here.
-__all__ = ["llm_service", "clean_output", "LLMService"]
+__all__ = ["llm_service", "clean_output", "ungrounded_numbers", "LLMService"]
+
+_NUMBER_RE = re.compile(r"(?<![\w.])\d[\d,]*(?:\.\d+)?")
+# Integers this small are usually counts ("3 reasons", "2 days"), not data.
+_FREE_INTEGER_MAX = 10
+
+
+def _numbers(text: str) -> list[tuple[str, float]]:
+    found = []
+    for token in _NUMBER_RE.findall(text):
+        try:
+            found.append((token, float(token.rstrip(",").replace(",", ""))))
+        except ValueError:
+            continue
+    return found
+
+
+def ungrounded_numbers(text: str, source: str) -> list[str]:
+    """
+    Numbers in model output that don't appear in the facts it was given
+    (allowing for rounding). A small local model invents or garbles prices, so
+    prose with any such number is not shown as fact.
+    """
+    known = [value for _, value in _numbers(source)]
+    bad = []
+    for token, value in _numbers(text):
+        if value.is_integer() and value <= _FREE_INTEGER_MAX:
+            continue
+        if not any(abs(value - k) <= max(0.01, 0.006 * abs(k)) for k in known):
+            bad.append(token)
+    return bad
 
 
 @dataclass
@@ -66,6 +97,9 @@ class LLMService:
         self._providers: dict[tuple, object] = {}
         self._availability: dict[int, tuple[bool, float]] = {}
         self._cap_warned: set[tuple[int, date]] = set()
+        # profile id -> {"state": "ok" | "no_credit", "message", "at"}: the credit state the
+        # latest real call revealed (for providers with no balance API, the only signal there is).
+        self.credit: dict[int, dict] = {}
         self._queue: Optional[asyncio.Queue] = None
         self._worker: Optional[asyncio.Task] = None
         self._busy = False
@@ -173,6 +207,14 @@ class LLMService:
             row.usage_count += 1
         return True
 
+    def note_credit(self, profile_id: int, error: Optional[ProviderError] = None) -> None:
+        """Record what a real call said about the account's credit (success = credit available)."""
+        if error is not None and not error.no_credit:
+            return   # other failures say nothing about credit
+        self.credit[profile_id] = {"state": "no_credit" if error else "ok",
+                                   "message": error.message if error else None,
+                                   "at": datetime.now(timezone.utc).isoformat(timespec="seconds")}
+
     async def _call(self, role: str, messages: list[dict], max_tokens: int, temperature: float,
                     effort: str) -> Optional[str]:
         profile = self.active(role)
@@ -181,8 +223,10 @@ class LLMService:
         try:
             text = await self._provider(profile).chat(messages, max_tokens=max_tokens, temperature=temperature,
                                                       effort=effort)
+            self.note_credit(profile.id)
             return text or None
         except ProviderError as exc:
+            self.note_credit(profile.id, exc)
             logger.error("LLM %s call failed (%s): %s", role, profile.name, exc.message)
             if exc.retryable:
                 self._availability.pop(profile.id, None)
@@ -198,7 +242,13 @@ class LLMService:
                                 effort="low" if role == "background" else "medium")
 
     async def _safe_invoke(self, prompt: str, fallback: str, role: str = "background") -> str:
+        """Fact-based prose: discarded (fallback used) if it states a number the prompt didn't contain."""
         text = await self.complete(prompt, temperature=settings.LLM_TEMPERATURE, max_tokens=700, role=role)
+        if text:
+            bad = ungrounded_numbers(text, prompt)
+            if bad:
+                logger.warning("Discarded LLM text with numbers not in its facts: %s", ", ".join(bad[:8]))
+                return fallback
         return text or fallback
 
     # ------------------------------------------------------------------
@@ -317,8 +367,10 @@ class LLMService:
         try:
             text = await self._provider(profile).chat(messages, max_tokens=900,
                                                       temperature=settings.LLM_TEMPERATURE, effort="medium")
+            self.note_credit(profile.id)
             return text or "I don't have an answer to that yet."
         except ProviderError as exc:
+            self.note_credit(profile.id, exc)
             logger.error("Chat failed (%s): %s", profile.name, exc.message)
             self._availability.pop(profile.id, None)
             return f"The chat model ({profile.name}) failed to answer: {exc.message}"

@@ -85,6 +85,12 @@ INTERACTIVE_COOLDOWN_SECONDS = 120       # pause practice this long after the us
 OUTLOOK_HEADLINES = 25
 
 
+def background_model_name() -> str:
+    """The model that actually serves background work right now (it can be switched at runtime)."""
+    profile = llm_service.active("background")
+    return profile.model if profile else settings.LLM_MODEL
+
+
 def today_ist() -> date:
     return datetime.now(IST).date()
 
@@ -275,7 +281,7 @@ class AIAnalystService:
                         published = None
                 db.add(AINewsInsight(stock_id=stock.id, headline_key=key, title=item["title"],
                                      link=item.get("link"), published=published, impact=impact,
-                                     reason=reason, model=settings.LLM_MODEL))
+                                     reason=reason, model=background_model_name()))
                 stored += 1
             db.commit()
         if stored:
@@ -394,7 +400,9 @@ class AIAnalystService:
         prediction.strategy = item.strategy
         prediction.conviction_at_prediction = item.conviction_score
         prediction.lessons_version = version
-        prediction.model = settings.LLM_MODEL
+        prediction.model = background_model_name()
+        bg = llm_service.active("background")
+        prediction.profile_id = bg.id if bg else None
         prediction.prompt_text = prompt
         prediction.raw_response = text
         prediction.created_at = datetime.utcnow()
@@ -556,7 +564,7 @@ class AIAnalystService:
         lesson = AILesson(version=version + 1, lessons_text="\n".join(new_lessons),
                           based_on_predictions=perf["graded"] + practice["graded"],
                           hit_rate_at_creation=perf["hit_rate"] if perf["hit_rate"] is not None else practice["hit_rate"],
-                          model=settings.LLM_MODEL)
+                          model=background_model_name())
         db.add(lesson)
         db.commit()
         db.refresh(lesson)
@@ -741,7 +749,7 @@ class AIAnalystService:
             direction=parsed["direction"], probability_up=parsed["probability_up"],
             expected_move_pct=parsed["expected_move_pct"], reason=parsed["reason"],
             price_at_prediction=snap.close, strategy=strategy, conviction_at_prediction=snap.technical_score,
-            lessons_version=version, model=settings.LLM_MODEL, prompt_text=prompt, raw_response=text,
+            lessons_version=version, model=background_model_name(), prompt_text=prompt, raw_response=text,
             actual_return_pct=round(ret, 2), actual_direction=classify_return(ret),
             correct=is_correct(parsed["direction"], ret), graded_at=datetime.utcnow(),
         )
@@ -804,7 +812,7 @@ class AIAnalystService:
         outlook = AIMarketOutlook(
             session_date=session, bias=parsed["direction"], probability_up=parsed["probability_up"],
             summary=summary[:600], sector_impacts_json=json.dumps(parse_sector_impacts(text, sectors)),
-            headlines_considered=len(headlines), lessons_version=version, model=settings.LLM_MODEL,
+            headlines_considered=len(headlines), lessons_version=version, model=background_model_name(),
             prompt_text=prompt, raw_response=text,
         )
         db.add(outlook)
@@ -814,10 +822,11 @@ class AIAnalystService:
         return outlook
 
     def latest_outlook(self, db: Session) -> Optional[AIMarketOutlook]:
+        """The newest outlook for the upcoming session, or None: a forecast for a session
+        that has already closed is history, not an outlook (see /ai/outlooks)."""
         return (db.query(AIMarketOutlook)
-                .filter(AIMarketOutlook.session_date >= self.next_session_date() - timedelta(days=0))
-                .order_by(AIMarketOutlook.created_at.desc()).first()) or \
-            db.query(AIMarketOutlook).order_by(AIMarketOutlook.created_at.desc()).first()
+                .filter(AIMarketOutlook.session_date >= self.next_session_date())
+                .order_by(AIMarketOutlook.created_at.desc()).first())
 
     @staticmethod
     def outlook_payload(outlook: Optional[AIMarketOutlook]) -> Optional[dict]:

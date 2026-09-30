@@ -14,11 +14,12 @@ import pytest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from analysis_service import (  # noqa: E402
-    BREAKOUT, NO_SETUP, AnalysisService, session_fraction,
+    BREAKOUT, NO_SETUP, AnalysisService, projected_volume_share, session_fraction, timing_score,
 )
+from data_provider import clean_daily_candles  # noqa: E402
 from kite_service import KiteService  # noqa: E402
 from learning_service import grade_against_candles, parse_holding_days  # noqa: E402
-from llm_service import clean_output  # noqa: E402
+from llm_service import clean_output, ungrounded_numbers  # noqa: E402
 from market_service import headline_sentiment, keyword_pattern  # noqa: E402
 
 IST = timezone(timedelta(hours=5, minutes=30))
@@ -88,6 +89,63 @@ def test_session_fraction_scales_only_todays_bar():
     yesterday_bar = pd.Timestamp("2026-09-23 09:15", tz="Asia/Kolkata")
     assert session_fraction(today_bar, now) == pytest.approx(187 / 375)
     assert session_fraction(yesterday_bar, now) == 1.0
+
+
+def test_early_session_volume_is_not_overprojected():
+    # 9:20 IST is ~1% of the session but already ~10% of a typical day's volume.
+    assert projected_volume_share(5 / 375) == pytest.approx(0.10)
+    assert projected_volume_share(60 / 375) > 60 / 375
+    assert projected_volume_share(1.0) == 1.0
+    shares = [projected_volume_share(f) for f in np.linspace(0.05, 1.0, 20)]
+    assert shares == sorted(shares)
+
+
+def test_snapshot_at_last_bar_matches_live_snapshot():
+    rng = np.random.default_rng(11)
+    closes = 150 * np.cumprod(1 + 0.002 + rng.normal(0, 0.01, 300))
+    candles = make_candles(closes)
+    live = svc.compute_indicators("SAME", candles, now=FAR_FUTURE)
+    df = svc.indicator_frame(candles)
+    replayed = svc.snapshot_at("SAME", df, svc.setup_flags(df), len(df) - 1)
+    assert replayed.technical_score == live.technical_score
+    assert replayed.setups == live.setups
+
+
+def test_timing_prefers_dip_in_uptrend_over_short_term_spike():
+    rise = list(100 * np.cumprod(np.full(275, 1.003)))   # ~year-long steady uptrend
+    dip = svc.compute_indicators("DIP", make_candles(rise + [rise[-1] * f for f in (0.98, 0.965, 0.955, 0.95, 0.945)]),
+                                 now=FAR_FUTURE)
+    spike = svc.compute_indicators("SPIKE", make_candles(rise + [rise[-1] * f for f in (1.03, 1.06, 1.09, 1.12, 1.15)]),
+                                   now=FAR_FUTURE)
+    # Same long-term trend, so the gap is purely short-term timing.
+    assert timing_score(dip) > 2
+    assert timing_score(spike) < 0
+    assert timing_score(dip) - timing_score(spike) > 5
+
+
+def test_market_below_ema50_blocks_new_buys():
+    rng = np.random.default_rng(7)
+    closes = 200 * np.cumprod(1 + 0.003 + rng.normal(0, 0.01, 300))
+    snap = svc.compute_indicators("GATE", make_candles(closes), now=FAR_FUTURE)
+    snap.technical_score = 70
+    assert svc.build_trade_plan(snap, "Trend Momentum", conviction=75).action == "BUY"
+    assert svc.build_trade_plan(snap, "Trend Momentum", conviction=75, market_uptrend=False).action == "WAIT"
+
+
+def test_plan_reasons_match_the_decision():
+    rng = np.random.default_rng(7)
+    closes = 200 * np.cumprod(1 + 0.003 + rng.normal(0, 0.01, 300))
+    snap = svc.compute_indicators("WHY", make_candles(closes), now=FAR_FUTURE)
+    snap.technical_score = 70
+    assert svc.build_trade_plan(snap, "Trend Momentum", conviction=75).reasons == []
+    no_setup = svc.build_trade_plan(snap, NO_SETUP, conviction=75)
+    assert no_setup.action == "WAIT" and no_setup.reasons == ["no entry setup has triggered yet"]
+    low = svc.build_trade_plan(snap, "Trend Momentum", conviction=50, market_uptrend=False)
+    assert low.action == "WAIT"
+    assert any("conviction 50/100" in r for r in low.reasons) and any("NIFTY" in r for r in low.reasons)
+    snap.technical_score = 30
+    avoid = svc.build_trade_plan(snap, "Trend Momentum", conviction=75)
+    assert avoid.action == "AVOID" and any("technical score 30/100" in r for r in avoid.reasons)
 
 
 def test_backtest_skips_live_bar_and_counts():
@@ -180,3 +238,101 @@ def test_short_keyword_skips_group_companies():
     assert pattern.search("SBI raises lending rates")
     assert not pattern.search("SBI Life, HDFC Life tank on IRDAI paper")
     assert not pattern.search("SBI Card spends rise")
+
+
+def test_llm_numbers_must_come_from_the_facts():
+    facts = "Entry 1777.40-1802.50, stop 1727.20, target 1915.45, conviction 69.1/100, 3-10 trading days"
+    assert ungrounded_numbers("Buy near 1,802 with a stop at 1727.2; target ₹1,915 (conviction 69).", facts) == []
+    assert ungrounded_numbers("Hold 3-10 days, 2 reasons.", facts) == []
+    assert ungrounded_numbers("Target 1,950 and stop 1,700.", facts) == ["1,950", "1,700"]
+
+
+def test_clean_daily_candles_drops_placeholders_and_adjusts_splits():
+    closes = [300.0, 303, 306, 309, 206, 208]            # 3:2 bonus between bar 3 and 4
+    df = make_candles(closes, volumes=[1000] * 6, spread=0.0)
+    df.loc[4, "open"] = 206.0
+    placeholder = df.iloc[[2]].assign(date=df["date"].iloc[2] + pd.Timedelta(hours=1), volume=0,
+                                      open=306.0, high=306.0, low=306.0, close=306.0)
+    df = pd.concat([df, placeholder]).sort_values("date").reset_index(drop=True)
+    out = clean_daily_candles(df, "TEST")
+    assert len(out) == 6 and (out["volume"] > 0).all()
+    factor = 206 / 309
+    assert out["close"].iloc[3] == pytest.approx(309 * factor)
+    assert out["close"].iloc[0] == pytest.approx(300 * factor)
+    assert out["close"].iloc[4] == 206                   # post-event prices untouched
+    assert out["volume"].iloc[0] == round(1000 / factor)
+
+
+def test_clean_daily_candles_keeps_real_crash_days():
+    df = make_candles([100.0, 100, 83, 85], spread=0.0)   # -17% gap: largest real one since 2019
+    df.loc[2, "open"] = 83.0
+    assert clean_daily_candles(df)["close"].tolist() == [100.0, 100, 83, 85]
+
+
+def test_list_orders_buy_then_wait_then_avoid():
+    from ranking_service import RankingService
+
+    def item(symbol, action, conviction):
+        return SimpleNamespace(symbol=symbol, action=action, conviction_score=conviction, strategy="Pullback to EMA",
+                               technical=SimpleNamespace(technical_score=60.0, volume_ratio=1.0),
+                               sentiment={"score": 50.0, "sentiment": "neutral"},
+                               rank=0, previous_rank=None, change_reason=None)
+
+    svc_rank = RankingService()
+    ranked = svc_rank.rerank_watchlist([item("AV", "AVOID", 80), item("W1", "WAIT", 60), item("B1", "BUY", 56),
+                                        item("W2", "WAIT", 70)])
+    assert [r.symbol for r in ranked] == ["B1", "W2", "W1", "AV"]
+    assert [r.rank for r in ranked] == [1, 2, 3, 4]
+    # A later run where the BUY turns WAIT explains the move by the action change.
+    again = svc_rank.rerank_watchlist([item("B1", "WAIT", 56), item("W2", "WAIT", 70)])
+    moved = next(r for r in again if r.symbol == "B1")
+    assert moved.rank == 2 and "now WAIT (was BUY)" in moved.change_reason
+
+
+# ---------------------------------------------------------------- model credit
+def test_out_of_credit_errors_are_recognised():
+    from llm_providers import _openai_error
+
+    class Fake(Exception):
+        def __init__(self, status_code, text, code=None):
+            super().__init__(text)
+            self.status_code, self.code = status_code, code
+
+    assert _openai_error(Fake(402, "Insufficient Balance")).no_credit                      # DeepSeek / OpenRouter
+    assert _openai_error(Fake(429, "You exceeded your current quota", "insufficient_quota")).no_credit   # OpenAI
+    assert not _openai_error(Fake(429, "Rate limit reached for requests")).no_credit
+
+
+@pytest.mark.parametrize("base_url,body,expected", [
+    ("https://api.deepseek.com/v1", {"is_available": True, "balance_infos": [
+        {"currency": "USD", "total_balance": "12.40"}]}, {"amount": 12.4, "currency": "USD"}),
+    ("https://openrouter.ai/api/v1", {"data": {"total_credits": 20, "total_usage": 7.5}},
+     {"amount": 12.5, "currency": "USD"}),
+    ("https://api.moonshot.ai/v1", {"data": {"available_balance": 3.2}}, {"amount": 3.2, "currency": "USD"}),
+])
+def test_fetch_balance_parses_each_provider(monkeypatch, base_url, body, expected):
+    import asyncio
+    import httpx
+    import llm_providers
+    from llm_providers import ProviderConfig, fetch_balance
+
+    seen = {}
+
+    def handler(request):
+        seen["url"] = str(request.url)
+        return httpx.Response(200, json=body)
+
+    real_client = httpx.AsyncClient
+    monkeypatch.setattr(llm_providers.httpx, "AsyncClient",
+                        lambda **kw: real_client(transport=httpx.MockTransport(handler), **kw))
+    config = ProviderConfig(kind="openai_compatible", model="m", base_url=base_url, api_key="k")
+    assert asyncio.run(fetch_balance(config)) == expected
+    assert seen["url"].split("/")[2] == base_url.split("/")[2]
+
+
+def test_providers_without_balance_api_return_none():
+    import asyncio
+    from llm_providers import ProviderConfig, fetch_balance
+    for config in (ProviderConfig(kind="anthropic", model="claude-opus-5-5"),
+                   ProviderConfig(kind="openai_compatible", model="m", base_url="https://api.openai.com/v1")):
+        assert asyncio.run(fetch_balance(config)) is None

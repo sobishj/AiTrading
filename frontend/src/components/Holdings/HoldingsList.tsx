@@ -1,7 +1,10 @@
+import { useEffect, useState } from "react";
 import type { Position } from "../../services/types";
 
 interface HoldingsListProps {
   positions: Position[];
+  /** Holdings with a recorded sale (closed or partly sold). */
+  sold: Position[];
   loading: boolean;
   error: string | null;
   selectedSymbol: string | null;
@@ -21,13 +24,109 @@ function riskTone(risk: number | null) {
 }
 
 /** Holdings tab: what you own, live P&L, and a risk dot (green / amber / red). */
-export default function HoldingsList({ positions, loading, error, selectedSymbol, onSelect, onAdd, onOpen }: HoldingsListProps) {
+const VIEW_KEY = "aitrading.holdingsView";
+
+function readView(): "open" | "sold" {
+  try {
+    return localStorage.getItem(VIEW_KEY) === "sold" ? "sold" : "open";
+  } catch {
+    return "open";
+  }
+}
+
+export default function HoldingsList({ positions, sold, loading, error, selectedSymbol, onSelect, onAdd, onOpen }: HoldingsListProps) {
+  const [view, setView] = useState<"open" | "sold">(readView);
+  useEffect(() => {
+    try {
+      localStorage.setItem(VIEW_KEY, view);
+    } catch {
+      /* per-browser convenience only */
+    }
+  }, [view]);
   const invested = positions.reduce((sum, p) => sum + p.invested, 0);
   const pnl = positions.reduce((sum, p) => sum + p.unrealized_pnl, 0);
+  const booked = sold.reduce((sum, p) => sum + p.realized_pnl, 0);
+  const winners = sold.filter((p) => p.realized_pnl > 0).length;
+
+  const toggle = (
+    <div className="flex rounded-lg bg-white/5 p-0.5 text-[11px]">
+      {(["open", "sold"] as const).map((v) => (
+        <button key={v} onClick={() => setView(v)}
+          className={`flex-1 py-1 rounded-md transition-colors ${view === v ? "bg-neon-blue/20 text-neon-blue" : "text-slate-400 hover:text-slate-200"}`}>
+          {v === "open" ? `Open (${positions.length})` : `Sold (${sold.length})`}
+        </button>
+      ))}
+    </div>
+  );
+
+  if (view === "sold") {
+    return (
+      <div className="flex flex-col h-full min-h-0">
+        <div className="px-3 pb-2 space-y-2 border-b border-white/5">
+          {toggle}
+          {sold.length > 0 && (
+            <div className="flex justify-between text-[11px] text-slate-400">
+              <span>{winners} of {sold.length} in profit</span>
+              <span className={booked >= 0 ? "text-neon-emerald" : "text-neon-rose"}>
+                Booked {booked >= 0 ? "+" : ""}{inr0(booked)}
+              </span>
+            </div>
+          )}
+        </div>
+        <div className="flex-1 overflow-y-auto p-2 space-y-0.5">
+          {!loading && sold.length === 0 && (
+            <div className="text-xs text-slate-500 px-3 py-4 text-center leading-relaxed">
+              No sales yet. When you mark shares as sold, the trade and its profit or loss appear here.
+            </div>
+          )}
+          {sold.map((p) => {
+            const selected = p.symbol === selectedSymbol;
+            const up = p.realized_pnl >= 0;
+            return (
+              <button
+                key={p.id}
+                onClick={() => {
+                  onSelect(p.symbol);
+                  onOpen(p);
+                }}
+                title="Open the trade — see every buy and sale, edit or undo them"
+                className={`w-full text-left px-3 py-2 rounded-xl transition-all duration-200 ${
+                  selected ? "bg-gradient-to-r from-neon-blue/15 to-neon-purple/10 border border-neon-blue/30"
+                    : "border border-transparent hover:bg-white/5 hover:border-white/10"
+                }`}
+              >
+                <div className="flex items-center gap-2">
+                  <span className={`flex-1 truncate text-sm font-medium ${selected ? "text-neon-blue" : "text-slate-200"}`}>{p.name}</span>
+                  {p.status === "open" && (
+                    <span className="text-[10px] px-1.5 rounded bg-white/10 text-slate-400" title={`${p.quantity} still held`}>part sold</span>
+                  )}
+                  <span className={`text-xs font-mono ${up ? "text-neon-emerald" : "text-neon-rose"}`}>
+                    {up ? "+" : ""}{inr0(p.realized_pnl)}
+                  </span>
+                </div>
+                <div className="flex justify-between text-[11px] mt-0.5">
+                  <span className="text-slate-500">
+                    {p.sold_quantity} · ₹{p.avg_buy_price_sold?.toLocaleString("en-IN")} → ₹{p.avg_sell_price?.toLocaleString("en-IN")}
+                  </span>
+                  <span className={up ? "text-neon-emerald" : "text-neon-rose"}>
+                    {p.realized_pct !== null && p.realized_pct !== undefined ? `${p.realized_pct >= 0 ? "+" : ""}${p.realized_pct.toFixed(1)}%` : "—"}
+                  </span>
+                </div>
+                <div className="text-[10px] text-slate-600 mt-0.5">
+                  Bought {p.opened_on} · sold {p.last_sold_on}
+                </div>
+              </button>
+            );
+          })}
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="flex flex-col h-full min-h-0">
       <div className="px-3 pb-2 space-y-2 border-b border-white/5">
+        {toggle}
         <button onClick={onAdd} className="btn-primary w-full text-xs py-1.5">+ Add shares I bought</button>
         {positions.length > 0 && (
           <div className="flex justify-between text-[11px] text-slate-400">

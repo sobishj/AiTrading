@@ -14,7 +14,7 @@ from sqlalchemy.orm import Session
 from llm_service import llm_service
 from market_service import market_service
 from models import MorningBrief
-from ranking_service import ranking_service
+from ranking_service import ENGINE_VERSION, ranking_service
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -29,6 +29,11 @@ def today_ist() -> date:
 class BriefService:
     def get_today(self, db: Session) -> Optional[MorningBrief]:
         return db.query(MorningBrief).filter(MorningBrief.brief_date == today_ist()).first()
+
+    @staticmethod
+    def is_current(brief: MorningBrief) -> bool:
+        """False when the brief's pick came from older engine logic."""
+        return json.loads(brief.context_json or "{}").get("engine_version") == ENGINE_VERSION
 
     async def generate(self, db: Session, force: bool = False) -> MorningBrief:
         existing = self.get_today(db)
@@ -46,7 +51,9 @@ class BriefService:
         others = [r for r in ranked if r.action == "BUY" and (best is None or r.symbol != best.symbol)][:3]
 
         best_text = self._pick_line(best, cfg) if best else (
-            "No stock meets the buy criteria today. Best-ranked names are still in WAIT: "
+            ("NIFTY is below its 50-day EMA, so no new long trades today — historically, long picks made "
+             "in a falling market lagged. " if not ranking_service.context.market_uptrend else "")
+            + "No stock meets the buy criteria today. Best-ranked names are still in WAIT: "
             + ", ".join(f"{r.name} ({r.conviction_score:.0f})" for r in ranked[:3]) + "."
         )
         other_text = "\n".join(self._pick_line(r, cfg) for r in others) or "None."
@@ -63,6 +70,7 @@ class BriefService:
                            f"{outlook['probability_up']:.0f}% chance NIFTY closes higher. {outlook['summary'] or ''} "
                            f"Sectors: {sectors}.")
         context = {
+            "engine_version": ENGINE_VERSION,
             "outlook": outlook,
             "regime": overview["regime"],
             "best_symbol": best.symbol if best else None,

@@ -4,6 +4,7 @@ import { useSettings } from "../../hooks/useSettings";
 import apiService from "../../services/api";
 import type { TradeUploadResult } from "../../services/types";
 import ModelEvidenceSection from "./ModelEvidenceSection";
+import TradingStyleSection from "./TradingStyleSection";
 
 interface LearningModalProps {
   onClose: () => void;
@@ -324,6 +325,8 @@ export default function LearningModal({ onClose }: LearningModalProps) {
           </div>
           {aiMessage && <p className="text-xs text-slate-400">{aiMessage}</p>}
         </section>
+
+        <TradingStyleSection version={version} />
 
         <ModelEvidenceSection version={version} />
 

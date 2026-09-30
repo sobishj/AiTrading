@@ -446,6 +446,30 @@ async def get_order_basket(symbol: str, db: Session = Depends(get_db)):
 async def chat(request: ChatMessageRequest, db: Session = Depends(get_db)):
     """Trading Coach chat, grounded in the live ranking, the selected stock and past conversation."""
     message = validate_chat_message(request.message)
+
+    # "I bought 10 at 265 and sold at 280": propose the trade for confirmation instead of chatting.
+    import trade_intent
+    intent = trade_intent.parse(message)
+    if intent is not None:
+        from api.portfolio_routes import build_trade_proposal
+        mentioned = insight_service.find_symbol_mentions(db, message, tracked_only=False)
+        symbol = mentioned[0] if mentioned else (validate_symbol(request.stock_context) if request.stock_context else None)
+        proposal = await build_trade_proposal(db, intent, symbol)
+        lines = [f"{a['side'].title()} {a['quantity']:g} " if a["quantity"] else f"{a['side'].title()} ? "
+                 for a in proposal["actions"]]
+        summary = "; ".join(f"{head}{proposal['symbol'] or '?'} @ Rs {a['price']:g} on {a['trade_date']}"
+                            for head, a in zip(lines, proposal["actions"]))
+        reply = (f"I read this as a trade to record: {summary}. Check the details below and press Confirm to save it "
+                 f"to your holdings — nothing is saved until you do. Every recorded trade teaches AiTrading your "
+                 f"trading style.")
+        chat_row = UserChat(user_message=message, ai_response=reply, stock_context=request.stock_context,
+                            timestamp=datetime.utcnow())
+        db.add(chat_row)
+        db.commit()
+        return ChatMessageResponse(id=chat_row.id, user_message=message, ai_response=reply,
+                                   stock_context=request.stock_context, timestamp=chat_row.timestamp,
+                                   trade_proposal=proposal)
+
     ranked = await ranking_service.run_full_ranking(db, max_age=RANKING_MAX_AGE_FOR_READS)
     by_symbol = {r.symbol: r for r in ranked}
 
@@ -528,8 +552,13 @@ async def get_recommendation_history(limit: int = 50, db: Session = Depends(get_
 
 @router.get("/morning-brief", response_model=MorningBriefResponse)
 async def get_morning_brief(db: Session = Depends(get_db)):
-    """Today's pre-market brief; generated on first request if the scheduler hasn't run yet."""
-    brief = brief_service.get_today(db) or await brief_service.generate(db)
+    """
+    Today's pre-market brief; generated on first request if the scheduler hasn't
+    run yet, and regenerated if it was written by older pick logic.
+    """
+    brief = brief_service.get_today(db)
+    if brief is None or not brief_service.is_current(brief):
+        brief = await brief_service.generate(db, force=True)
     return brief_service.to_payload(brief)
 
 
@@ -561,6 +590,8 @@ async def upload_trades(file: UploadFile = File(...), db: Session = Depends(get_
 
     result = learning_service.import_tradebook(db, df)
     cycle = await learning_service.run_learning_cycle(db)
+    from api.portfolio_routes import _learn_from_trades
+    _learn_from_trades()   # re-analyse your trading style with the uploaded trades
     return TradeUploadResponse(**result, graded=cycle["graded"], recalibration=cycle["recalibration"])
 
 
