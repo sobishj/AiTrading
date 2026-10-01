@@ -97,8 +97,9 @@ def test_exchange_facts_adjust_scores_with_reasons():
         "delivery": {"deliv_pct": 60.0, "deliv_avg_20": 40.0, "deliv_ratio": 1.5, "change_pct": 4.8}})
     adjustments = {}
     RankingService._apply_exchange_facts(item, adjustments)
-    assert adjustments == {"results_risk": -3.0, "fo_ban": -2.0, "delivery": 2.0}
-    assert any("Results due 08 Oct" in t for t in item.tags) and any("real buying" in t for t in item.tags)
+    # Not measured yet: a weak, labelled prior.
+    assert adjustments == {"results_risk": -3.0, "fo_ban": -2.0, "delivery": 1.0}
+    assert any("Results due 08 Oct" in t for t in item.tags) and any("not yet measured" in t for t in item.tags)
     quiet = SimpleNamespace(tags=[], exchange={"delivery": {"deliv_pct": 41, "deliv_ratio": 1.02, "change_pct": 3}})
     adjustments = {}
     RankingService._apply_exchange_facts(quiet, adjustments)
@@ -123,3 +124,26 @@ def test_missing_feed_sessions_are_filled_from_nse_but_never_across_a_split():
     # Sessions outside the feed's own range (before its first bar / after its last) are left alone.
     svc._sessions = {"ACME": [{**official, "trade_date": date(2026, 10, 2)}]}
     assert len(svc.fill_missing_sessions("ACME", feed)) == 4
+
+
+def test_delivery_adjustment_follows_what_history_measured():
+    from types import SimpleNamespace
+    from nse_service import nse_service
+    from ranking_service import RankingService
+
+    def run(edge):
+        nse_service.delivery_edges["delivery_buying"] = edge
+        item = SimpleNamespace(tags=[], exchange={"delivery": {"deliv_pct": 60.0, "deliv_ratio": 1.5, "change_pct": 2.0}})
+        adjustments = {}
+        RankingService._apply_exchange_facts(item, adjustments)
+        return adjustments.get("delivery"), item.tags[-1]
+
+    try:
+        points, tag = run({"n": 900, "rate": 58.0, "base": 51.0, "edge": 7.0})     # measured edge: 7 pts -> 2.8
+        assert points == 2.8 and "58% of 900" in tag
+        points, tag = run({"n": 900, "rate": 49.0, "base": 51.0, "edge": -2.0})    # history says no edge -> 0
+        assert points is None and "historically no edge" in tag
+        points, _ = run({"n": 900, "rate": 80.0, "base": 51.0, "edge": 29.0})      # capped
+        assert points == 3.0
+    finally:
+        nse_service.delivery_edges["delivery_buying"] = None

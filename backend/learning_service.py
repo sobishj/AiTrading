@@ -387,6 +387,12 @@ class LearningService:
         ai_graded = await ai_analyst_service.grade_predictions(db)
         await ai_analyst_service.grade_outlooks(db)
         await position_service.grade_alerts(db)
+        try:
+            from sources_service import evaluate_usefulness
+            evaluate_usefulness(db)            # how often each news source's items, as the AI read them, were right
+        except Exception as exc:  # noqa: BLE001  (a side measurement must not stop the learning cycle)
+            logger.warning("Source usefulness not updated: %s", exc)
+            db.rollback()
         return {"graded": graded, "ai_forecasts_graded": ai_graded, "recalibration": recalibration,
                 "strategies": self.strategy_performance(db)}
 

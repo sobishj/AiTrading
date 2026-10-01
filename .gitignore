@@ -43,3 +43,5 @@ credentials*.json
 
 # Backups contain your trades, holdings and everything the app learned (Settings -> Backup & restore)
 backend/backups/
+backend/.stop-background
+backend/.runner.pid

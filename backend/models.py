@@ -178,6 +178,9 @@ class AppSettings(Base):
     # Which saved LLM profile serves chat/analyst notes vs. background work (news, forecasts, practice).
     chat_profile_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     background_profile_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # Chart practice can run on its own model (e.g. free local Qwen) while paid models do background work.
+    # Null = the background model, exactly as before.
+    practice_profile_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     # Windows toast notifications for holding alerts (in addition to in-app/browser alerts).
     desktop_notifications: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true", nullable=False)
     # "single" = one model (the background model), exactly the original behaviour;
@@ -190,6 +193,11 @@ class AppSettings(Base):
     auto_list_size: Mapped[int | None] = mapped_column(Integer, nullable=True)
     ai_review_shortlist: Mapped[int | None] = mapped_column(Integer, nullable=True)
     min_traded_value_cr: Mapped[float | None] = mapped_column(Numeric, nullable=True)
+    # Background learning (Settings -> General): paused = no AI research/learning jobs (prices and holding
+    # alerts keep running); learning_resume_at = resume automatically then (null = until you resume).
+    learning_paused: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false", nullable=False)
+    learning_resume_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    last_learning_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
@@ -237,6 +245,8 @@ class AINewsInsight(Base):
     impact: Mapped[int] = mapped_column(Integer, nullable=False)
     reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     model: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    # Where the headline came from (a news feed's name, or "NSE filing"), to measure each source's usefulness.
+    source: Mapped[str | None] = mapped_column(String(160), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
 
     stock: Mapped["Stock"] = relationship()
@@ -293,6 +303,9 @@ class AIPrediction(Base):
     actual_direction: Mapped[str | None] = mapped_column(String(10), nullable=True)
     correct: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     graded_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # Set aside instead of graded when the price data couldn't be trusted (why, in words). Kept, never
+    # deleted, so the record stays auditable; quarantined forecasts count in no statistic.
+    quarantined: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     stock: Mapped["Stock"] = relationship()
 
@@ -549,6 +562,10 @@ class DataSource(Base):
     last_ok_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
     last_items: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # Usefulness: of the AI's non-neutral reads of this source's items, how many matched the next 5 sessions' move.
+    usefulness_n: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    usefulness_hits: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    usefulness_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 

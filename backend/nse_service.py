@@ -23,6 +23,7 @@ from datetime import date, datetime, timedelta, timezone
 from typing import Optional
 
 import httpx
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from utils.logger import get_logger
@@ -50,6 +51,10 @@ DEALS_TTL = 3600
 BHAV_SESSIONS = 21                 # latest session + 20 for the delivery average
 BHAV_MAX_AGE_DAYS = 5              # older than this = not today's picture; delivery/cross-check unused
 RESULTS_RISK_DAYS = 7              # results board meeting within this many days = gap risk for a swing trade
+HISTORY_SESSIONS = 250             # a year of official records, for measuring what delivery predicts
+DELIVERY_RATIO_MIN = 1.3           # "unusually high" delivery vs its 20-session average
+MIN_CHANGE_PCT = 0.5               # ...on a day that actually moved
+MIN_EDGE_SAMPLES = 30              # a measured edge is used only from this many cases
 
 # Filing categories that are paperwork, not news (matched case-insensitively as substrings).
 ROUTINE = (
@@ -200,6 +205,8 @@ class NSEService:
         self._deals: dict[str, list[dict]] = {}
         self._delivery: dict[str, dict] = {}
         self._sessions: dict[str, list[dict]] = {}      # official daily bars per share, newest first
+        # Measured from a year of NSE history (knowledge_service.delivery_study); None = not measured yet.
+        self.delivery_edges: dict[str, Optional[dict]] = {"delivery_buying": None, "delivery_selling": None}
         self._fetched: dict[str, float] = {}
         self._status: dict[str, dict] = {}
         self._lock = asyncio.Lock()
@@ -363,6 +370,67 @@ class NSEService:
             if s not in self._delivery and rs[0]["trade_date"] == dates[0]:
                 self._delivery[s] = {"date": rs[0]["trade_date"], "close": rs[0]["close"], "change_pct": None,
                                      "deliv_pct": None, "deliv_avg_20": None, "deliv_ratio": None}
+
+    async def backfill_history(self, db: Session, sessions: int = HISTORY_SESSIONS) -> dict:
+        """
+        Download older official end-of-day files (about a year), politely (one at a time), for the shares
+        the app knows — so what delivery predicts can be measured rather than assumed. Resumable.
+        """
+        from models import NSEDaily, Stock
+
+        if self._switched_off("bhavcopy"):
+            return {"downloaded": 0, "off": True}
+        known = {s for (s,) in db.query(Stock.symbol)}
+        have = {d for (d,) in db.query(NSEDaily.trade_date).distinct()}
+        today = datetime.now(IST).date()
+        added, day = 0, today - timedelta(days=1)
+        async with httpx.AsyncClient(headers=_HEADERS, timeout=30, follow_redirects=True) as client:
+            for _ in range(int(sessions * 7 / 5) + 30):
+                if len(have) >= sessions:
+                    break
+                if day.weekday() < 5 and day not in have:
+                    try:
+                        response = await client.get(BHAV_URL.format(d=day))
+                        if response.status_code == 200 and "SYMBOL" in response.text[:200]:
+                            rows = parse_bhavcopy(response.text)
+                            file_day = rows[0]["trade_date"] if rows else None
+                            if file_day is not None and file_day not in have:
+                                db.bulk_insert_mappings(NSEDaily, [r for r in rows if r["trade_date"] == file_day
+                                                                   and r["symbol"] in known])
+                                db.commit()
+                                have.add(file_day)
+                                added += 1
+                    except IntegrityError:
+                        db.rollback()               # another run stored this day meanwhile: skip it
+                        have.add(day)
+                    except Exception as exc:  # noqa: BLE001
+                        db.rollback()
+                        logger.warning("NSE history backfill stopped at %s: %s", day, exc)
+                        break
+                    await asyncio.sleep(0.5)        # be polite to NSE's servers
+                day -= timedelta(days=1)
+        if added:
+            logger.info("NSE history: downloaded %d older session(s); %d on record", added, len(have))
+        return {"downloaded": added, "sessions": len(have)}
+
+    def load_delivery_edges(self, db: Session) -> None:
+        """Read the measured delivery edges (source 'nse' pattern stats) into memory for the ranking."""
+        from models import PatternStat
+
+        rows = {r.pattern: r for r in db.query(PatternStat).filter(PatternStat.source == "nse")}
+        base = rows.get("ALL")
+        if not base or not base.occurrences:
+            return
+        up_rate = base.successes / base.occurrences * 100
+        for pattern in ("delivery_buying", "delivery_selling"):
+            r = rows.get(pattern)
+            if r is None or r.occurrences < MIN_EDGE_SAMPLES:
+                self.delivery_edges[pattern] = None
+                continue
+            rate = r.successes / r.occurrences * 100
+            base_rate = up_rate if pattern == "delivery_buying" else 100 - up_rate
+            self.delivery_edges[pattern] = {"n": r.occurrences, "rate": round(rate, 1),
+                                            "base": round(base_rate, 1), "edge": round(rate - base_rate, 1)}
 
     # ------------------------------------------------------------------
     # Reads (sync, safe from worker threads)

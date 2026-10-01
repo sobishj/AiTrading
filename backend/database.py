@@ -141,6 +141,15 @@ _COLUMN_MIGRATIONS = [
     "ALTER TABLE app_settings ADD COLUMN IF NOT EXISTS auto_list_size INTEGER",
     "ALTER TABLE app_settings ADD COLUMN IF NOT EXISTS ai_review_shortlist INTEGER",
     "ALTER TABLE app_settings ADD COLUMN IF NOT EXISTS min_traded_value_cr DECIMAL",
+    "ALTER TABLE app_settings ADD COLUMN IF NOT EXISTS learning_paused BOOLEAN NOT NULL DEFAULT FALSE",
+    "ALTER TABLE app_settings ADD COLUMN IF NOT EXISTS learning_resume_at TIMESTAMP",
+    "ALTER TABLE app_settings ADD COLUMN IF NOT EXISTS last_learning_at TIMESTAMP",
+    "ALTER TABLE app_settings ADD COLUMN IF NOT EXISTS practice_profile_id INTEGER",
+    "ALTER TABLE ai_predictions ADD COLUMN IF NOT EXISTS quarantined TEXT",
+    "ALTER TABLE ai_news_insights ADD COLUMN IF NOT EXISTS source VARCHAR(160)",
+    "ALTER TABLE data_sources ADD COLUMN IF NOT EXISTS usefulness_n INTEGER",
+    "ALTER TABLE data_sources ADD COLUMN IF NOT EXISTS usefulness_hits INTEGER",
+    "ALTER TABLE data_sources ADD COLUMN IF NOT EXISTS usefulness_at TIMESTAMP",
     "CREATE INDEX IF NOT EXISTS ix_ai_predictions_model ON ai_predictions (model)",
 ]
 

@@ -5,8 +5,9 @@
   Double-click start-aitrading.bat, or run:
       powershell -ExecutionPolicy Bypass -File C:\VSCode\AiTrading\start-aitrading.ps1
 
-  The backend and frontend open in two minimized console windows titled
-  "AiTrading Backend" / "AiTrading Frontend". Close them (or run stop-aitrading.bat) to stop.
+  The backend runs in the background with no window (run-backend.ps1 keeps it running and restarts it
+  if it ever stops; its output is in backend\logs\backend-runner.log). The frontend opens in a
+  minimized console window titled "AiTrading Frontend". Run stop-aitrading.bat to stop both.
 #>
 # Not "Stop": in Windows PowerShell 5.1 that turns any stderr output from native
 # tools (docker prints warnings there) into terminating errors. Failures are
@@ -102,13 +103,14 @@ foreach ($p in 8000, 8010) { if (Test-AiTradingBackend $p) { $BackendPort = $p; 
 if ($BackendPort) {
     Ok "Already running on port $BackendPort."
 } else {
-    # Prefer 8000; fall back to 8010 when something else holds 8000.
-    $BackendPort = if (Test-PortListening 8000) { 8010 } else { 8000 }
-    if (Test-PortListening $BackendPort) { throw "Ports 8000 and 8010 are both in use by other programs." }
-    if ($BackendPort -ne 8000) { Warn "Port 8000 is used by another program - using $BackendPort." }
-    $cmd = "title AiTrading Backend && cd /d `"$BackendDir`" && `"$Python`" -m uvicorn main:app --port $BackendPort"
-    Start-Process cmd.exe -ArgumentList "/k", $cmd -WindowStyle Minimized
-    if (Wait-Until { Test-AiTradingBackend $BackendPort } 90 "the backend") { Ok "Backend is up on port $BackendPort." }
+    if (Test-PortListening 8000) { throw "Port 8000 is in use by another program - close it and run this again." }
+    $BackendPort = 8000
+    # Hidden background runner: keeps the backend (and so learning) going without a window, and
+    # restarts it if it ever stops. stop-aitrading.bat stops it for good.
+    $Runner = Join-Path $Root "run-backend.ps1"
+    Start-Process powershell.exe -WindowStyle Hidden -ArgumentList @(
+        "-NoProfile", "-ExecutionPolicy", "Bypass", "-WindowStyle", "Hidden", "-File", "`"$Runner`"")
+    if (Wait-Until { Test-AiTradingBackend $BackendPort } 120 "the backend") { Ok "Backend is up on port $BackendPort (running in the background)." }
 }
 
 # ---------------------------------------------------------------- 4. Frontend

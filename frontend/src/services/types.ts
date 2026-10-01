@@ -406,6 +406,8 @@ export interface AppStatus {
   background_llm_available?: boolean;
   llm_model: string;
   models?: { chat: ModelRef | null; background: ModelRef | null };
+  /** Background learning paused from Settings -> General (prices and holding alerts keep running). */
+  learning?: { paused: boolean; resume_at: string | null };
   last_ranked_at: string | null;
   market_regime: MarketRegime;
 }
@@ -666,6 +668,8 @@ export interface LLMProfilesResponse {
   profiles: LLMProfile[];
   chat_profile_id: number | null;
   background_profile_id: number | null;
+  /** null = chart practice runs on the background model. */
+  practice_profile_id?: number | null;
   chat_available: boolean;
   background_available: boolean;
 }
@@ -847,6 +851,16 @@ export interface ModelCostStats {
   recent_calls_per_day: number;
 }
 
+/** Settings -> General -> Background learning (GET/PUT /settings/background). */
+export interface BackgroundStatus {
+  autostart: boolean;
+  under_runner: boolean;
+  paused: boolean;
+  resume_at: string | null;
+  last_learning_at: string | null;
+  next_jobs: { job: string; at: string }[];
+}
+
 export interface DataSourceRow {
   id: number;
   kind: string;
@@ -858,6 +872,8 @@ export interface DataSourceRow {
   last_ok_at: string | null;
   last_error: string | null;
   last_items: number | null;
+  /** How often the AI's reads of this source's items matched the next 5 sessions' move (null = not measured). */
+  usefulness: { n: number; hits: number; rate: number | null; judged: boolean } | null;
 }
 
 export interface FeedTest {

@@ -44,10 +44,12 @@ def reliability(stats: dict) -> tuple[float, str]:
     """(weight 0.25-2.0, explanation) from graded outcomes; 1.0 = no record yet."""
     n, hits = int(stats.get("n") or 0), int(stats.get("hits") or 0)
     cn, ch = int(stats.get("context_n") or 0), int(stats.get("context_hits") or 0)
+    # The rate uses recency-weighted counts when given (recent forecasts count more); the text shows raw counts.
     if cn >= MIN_CONTEXT_SAMPLES:
-        rate, why = shrunk_rate(ch, cn), f"{ch}/{cn} correct in {stats.get('context_label') or 'similar setups'}"
+        rate = shrunk_rate(stats.get("context_whits", ch), stats.get("context_wn", cn))
+        why = f"{ch}/{cn} correct in {stats.get('context_label') or 'similar setups'}"
     elif n > 0:
-        rate, why = shrunk_rate(hits, n), f"{hits}/{n} correct overall"
+        rate, why = shrunk_rate(stats.get("whits", hits), stats.get("wn", n)), f"{hits}/{n} correct overall"
     else:
         return 1.0, "no graded outcomes yet (neutral weight)"
     return max(0.25, min(2.0, 1.0 + (rate - 0.5) * 4)), why

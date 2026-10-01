@@ -166,4 +166,66 @@ class SourcesService:
             logger.debug("Source status not recorded: %s", exc)
 
 
+USEFULNESS_HORIZON = 5          # sessions after a read
+USEFULNESS_FLAT_PCT = 0.5       # smaller moves say nothing about the read
+USEFULNESS_LOOKBACK_DAYS = 180
+USEFULNESS_MIN = 30             # reads before a source is judged
+
+
+def read_was_right(impact: int, ret_pct: float) -> Optional[bool]:
+    """Did the price move the way the AI read the item? None when the move was too small to tell."""
+    if impact == 0 or abs(ret_pct) < USEFULNESS_FLAT_PCT:
+        return None
+    return (impact > 0) == (ret_pct > 0)
+
+
+def evaluate_usefulness(db: Session) -> dict:
+    """
+    For every source: of the AI's non-neutral reads of its items (last 6 months, at least 5 sessions old), how
+    many matched the move over the next 5 sessions — measured on NSE's official closes. Stored on the source.
+    """
+    from collections import defaultdict
+    from datetime import timedelta, timezone
+
+    from models import AINewsInsight, DataSource, NSEDaily, Stock
+
+    since = datetime.utcnow() - timedelta(days=USEFULNESS_LOOKBACK_DAYS)
+    reads = (db.query(AINewsInsight, Stock.symbol).join(Stock, AINewsInsight.stock_id == Stock.id)
+             .filter(AINewsInsight.source.isnot(None), AINewsInsight.impact != 0,
+                     AINewsInsight.created_at >= since).all())
+    if not reads:
+        return {}
+    symbols = {s for _, s in reads}
+    closes: dict[str, list] = defaultdict(list)
+    for sym, day, close in (db.query(NSEDaily.symbol, NSEDaily.trade_date, NSEDaily.close)
+                            .filter(NSEDaily.symbol.in_(symbols), NSEDaily.series.in_(("EQ", "BE")))
+                            .order_by(NSEDaily.symbol, NSEDaily.trade_date)):
+        closes[sym].append((day, float(close)))
+    ist = timezone(timedelta(hours=5, minutes=30))
+    tally: dict[str, list[int]] = defaultdict(lambda: [0, 0])
+    for read, sym in reads:
+        series = closes.get(sym)
+        if not series:
+            continue
+        when = (read.published or read.created_at).replace(tzinfo=timezone.utc).astimezone(ist).date()
+        base = max((i for i, (d, _) in enumerate(series) if d <= when), default=None)
+        if base is None or base + USEFULNESS_HORIZON >= len(series):
+            continue                       # too recent (or before the record starts): not judged yet
+        ret = (series[base + USEFULNESS_HORIZON][1] / series[base][1] - 1) * 100
+        right = read_was_right(read.impact, ret)
+        if right is None:
+            continue
+        tally[read.source][0] += 1
+        tally[read.source][1] += int(right)
+    now = datetime.utcnow()
+    for source in db.query(DataSource).all():
+        key = "NSE filing" if source.kind == "nse_filings" else source.name
+        if source.kind not in ("rss", "nse_filings"):
+            continue
+        n, hits = tally.get(key, [0, 0])
+        source.usefulness_n, source.usefulness_hits, source.usefulness_at = n, hits, now
+    db.commit()
+    return {k: {"n": v[0], "hits": v[1]} for k, v in tally.items()}
+
+
 sources_service = SourcesService()

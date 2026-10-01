@@ -61,6 +61,22 @@ export default function SourcesTab() {
     return <span className="text-slate-500">not fetched yet</span>;
   };
 
+  const usefulness = (r: DataSourceRow) => {
+    const u = r.usefulness;
+    if (!u || (r.kind !== "rss" && r.kind !== "nse_filings")) return null;
+    if (!u.judged) {
+      return <div className="text-[11px] text-slate-500">Usefulness: {u.n} of 30 judged reads so far</div>;
+    }
+    const weak = (u.rate ?? 0) < 52;
+    return (
+      <div className={`text-[11px] ${weak ? "text-amber-300" : "text-slate-400"}`}
+        title="Of the AI's positive/negative reads of this source's items, how often the price moved that way over the next 5 sessions (NSE closing prices). 50% is a coin flip.">
+        Usefulness: the AI's reads were right {u.rate}% of {u.n} times
+        {weak && " — adds little; consider removing it"}
+      </div>
+    );
+  };
+
   const row = (r: DataSourceRow) => (
     <div key={r.id} className={`glass-panel px-3 py-2 flex items-center gap-3 ${r.enabled ? "" : "opacity-60"}`}>
       <input type="checkbox" checked={r.enabled} disabled={busy !== null} aria-label={`Use ${r.name}`}
@@ -72,6 +88,7 @@ export default function SourcesTab() {
         </div>
         <div className="text-[11px] text-slate-500 truncate">{r.url ?? r.notes}</div>
         <div className="text-[11px]">{status(r)}</div>
+        {usefulness(r)}
       </div>
       {!r.builtin && (
         <button disabled={busy !== null} className="text-xs text-slate-500 hover:text-neon-rose"

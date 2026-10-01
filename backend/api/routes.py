@@ -74,6 +74,13 @@ class ConnectionManager:
 connection_manager = ConnectionManager()
 
 
+def _learning_status() -> dict:
+    from preferences import learning_state
+    state = learning_state()
+    return {"paused": state["paused"],
+            "resume_at": state["resume_at"].isoformat() + "Z" if state["resume_at"] else None}
+
+
 async def refresh_and_broadcast(db: Session, trigger: Optional[str] = None) -> list[RankedStock]:
     """Force a full re-rank, record top BUY ideas, and push the new order to every client."""
     ranked = await ranking_service.run_full_ranking(db, force=True)
@@ -149,6 +156,7 @@ async def get_status():
         "llm_model": (llm_service.active("chat").name + " · " + llm_service.active("chat").model)
                      if llm_service.active("chat") else settings.LLM_MODEL,
         "models": llm_service.describe(),
+        "learning": _learning_status(),
         "last_ranked_at": ranking_service.last_ranked_at.isoformat() if ranking_service.last_ranked_at else None,
         "market_regime": ranking_service.context.market_regime,
     }

@@ -149,7 +149,11 @@ class KnowledgeService:
             for d, c, e20, e50 in zip(pd.to_datetime(nf["date"]).dt.date, nf["close"], nf["ema_20"], nf["ema_50"]):
                 nifty_regime[d] = trend_regime(c, e20, e50)
 
-        stocks = db.query(Stock).filter(tracked_stock_filter()).all()
+        # The whole market pool (NIFTY 500) plus anything tracked: ~10x the evidence of the tracked list alone.
+        from discovery_service import discovery_service
+        pool = {s.id: s for s in discovery_service.pool(db)}
+        pool.update({s.id: s for s in db.query(Stock).filter(tracked_stock_filter()).all()})
+        stocks = list(pool.values())
         counters: dict = defaultdict(_Counter)
         observations = 0
         for stock in stocks:
@@ -162,8 +166,67 @@ class KnowledgeService:
         if observations == 0:
             return {"skipped": True, "reason": "no price history available"}
         rows = _save_counters(db, counters, "history")
+        try:
+            self.delivery_study(db)
+        except Exception as exc:  # noqa: BLE001  (the price study above stands on its own)
+            logger.warning("Delivery study failed: %s", exc)
+            db.rollback()
         logger.info("Factor study: %d observations from %d stocks -> %d pattern rows", observations, len(stocks), rows)
         return {"observations": observations, "stocks": len(stocks), "patterns": rows}
+
+    def delivery_study(self, db: Session) -> dict:
+        """
+        Does a move on unusually high delivery predict the next 5 sessions? Measured on NSE's official daily
+        records (bhavcopy): "delivery_buying" = up >= 0.5% on delivery >= 1.3x its 20-session average,
+        "delivery_selling" = the same on a down day; compared with any day's base rate. Windows that span a
+        split/bonus (a day-to-day jump beyond the corporate-action band) are skipped.
+        """
+        from data_provider import CORPORATE_ACTION_GAP
+        from models import NSEDaily
+        from nse_service import DELIVERY_RATIO_MIN, MIN_CHANGE_PCT
+
+        low, high = CORPORATE_ACTION_GAP
+        rows = (db.query(NSEDaily.symbol, NSEDaily.trade_date, NSEDaily.close, NSEDaily.prev_close,
+                         NSEDaily.deliv_pct)
+                .filter(NSEDaily.series == "EQ").order_by(NSEDaily.symbol, NSEDaily.trade_date).all())
+        by_symbol: dict[str, list] = defaultdict(list)
+        for r in rows:
+            by_symbol[r.symbol].append(r)
+        counters: dict = defaultdict(_Counter)
+        observed = 0
+        for series in by_symbol.values():
+            closes = [float(r.close) for r in series]
+            for i in range(20, len(series) - HORIZON):
+                window = closes[i:i + HORIZON + 1]
+                if any(not (low <= b / a <= high) for a, b in zip(window, window[1:])):
+                    continue
+                ret = (closes[i + HORIZON] / closes[i] - 1) * 100
+                base = counters[("ALL", "bullish", "ALL")]
+                base.n += 1
+                base.ok += int(ret > 0)
+                base.ret += ret
+                observed += 1
+                today = series[i]
+                earlier = [float(r.deliv_pct) for r in series[i - 20:i] if r.deliv_pct is not None]
+                if today.deliv_pct is None or len(earlier) < 10 or not today.prev_close:
+                    continue
+                ratio = float(today.deliv_pct) / (sum(earlier) / len(earlier))
+                change = (float(today.close) / float(today.prev_close) - 1) * 100
+                if ratio < DELIVERY_RATIO_MIN or abs(change) < MIN_CHANGE_PCT:
+                    continue
+                pattern, bias = ("delivery_buying", "bullish") if change > 0 else ("delivery_selling", "bearish")
+                c = counters[(pattern, bias, "ALL")]
+                c.n += 1
+                c.ok += int(ret > 0) if bias == "bullish" else int(ret < 0)
+                c.ret += ret
+        if observed == 0:
+            return {"skipped": True, "reason": "no NSE history yet"}
+        _save_counters(db, counters, "nse")
+        from nse_service import nse_service
+        nse_service.load_delivery_edges(db)
+        summary = {k[0]: {"n": v.n, "rate": round(v.ok / v.n * 100, 1)} for k, v in counters.items() if v.n}
+        logger.info("Delivery study: %d observations from %d shares: %s", observed, len(by_symbol), summary)
+        return {"observations": observed, "shares": len(by_symbol), "patterns": summary}
 
     def update_live_stats(self, db: Session) -> int:
         """Rebuild live pattern stats from graded analyses (one observation per stock per day)."""
@@ -265,7 +328,7 @@ class KnowledgeService:
         rows = (db.query(AIPrediction)
                 .filter(AIPrediction.graded_at.isnot(None), AIPrediction.kind == "live", AIPrediction.model == model,
                         AIPrediction.role.in_(("member", "primary"))).all())
-        stats = {"n": len(rows), "hits": sum(1 for p in rows if p.correct)}
+        stats = {"n": len(rows), "hits": sum(1 for p in rows if p.correct), **_weighted(rows)}
         candidates = [
             (lambda p: primary_regime(p.market_regime) == regime and p.strategy == setup,
              f"{regime} markets, {setup} setups"),
@@ -275,8 +338,9 @@ class KnowledgeService:
         for pred, label in candidates:
             subset = [p for p in rows if pred(p)]
             if len(subset) >= MIN_CONTEXT_SAMPLES:
+                weighted = _weighted(subset)
                 stats.update(context_n=len(subset), context_hits=sum(1 for p in subset if p.correct),
-                             context_label=label)
+                             context_label=label, context_wn=weighted["wn"], context_whits=weighted["whits"])
                 break
         return stats
 
@@ -414,6 +478,20 @@ class KnowledgeService:
                     "target_hit": p.target_hit, "stop_hit": p.stop_hit, "pnl_pct": _f(p.outcome_pnl_pct),
                     "graded_at": p.graded_at.isoformat()},
             }
+
+
+RELIABILITY_HALF_LIFE_DAYS = 90    # markets change: a forecast's weight in a model's record halves every 90 days
+
+
+def _weighted(rows) -> dict:
+    """Recency-weighted count and hits: recent graded forecasts count more than old ones."""
+    today = datetime.utcnow().date()
+    wn = whits = 0.0
+    for p in rows:
+        w = 0.5 ** (max(0, (today - p.prediction_date).days) / RELIABILITY_HALF_LIFE_DAYS)
+        wn += w
+        whits += w if p.correct else 0.0
+    return {"wn": round(wn, 3), "whits": round(whits, 3)}
 
 
 def _f(v):

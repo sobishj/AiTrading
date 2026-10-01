@@ -26,6 +26,10 @@ function Stop-Server([int]$Port, [string]$Name) {
     return $true
 }
 
+# Tell the background runner (run-backend.ps1) this stop is deliberate, so it doesn't restart the backend.
+$StopFlag = Join-Path $PSScriptRoot "backend\.stop-background"
+Set-Content -Path $StopFlag -Value (Get-Date -Format o)
+
 # Only stop a backend port that is actually AiTrading (8000 may belong to another program).
 $backendStopped = $false
 foreach ($port in 8000, 8010) {
@@ -37,4 +41,5 @@ foreach ($port in 8000, 8010) {
 if (-not $backendStopped) { Write-Host "Backend was not running." }
 if (-not (Stop-Server 5173 "AiTrading frontend")) { Write-Host "Frontend was not running." }
 
-Write-Host "AiTrading stopped. Learning is paused until you start it again."
+Write-Host "AiTrading stopped (including background learning) until you start it again."
+Write-Host "If 'Start with Windows' is on, it starts again at your next log-in."

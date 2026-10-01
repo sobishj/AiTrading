@@ -16,6 +16,8 @@ interface TopBarProps {
   onOpenLearning: () => void;
   /** Settings window (data sources, general options, backup & restore). */
   onOpenSettings: () => void;
+  /** Settings -> General (background learning controls). */
+  onOpenLearningSettings?: () => void;
   alertsKey: number;
   onAlertSelect: (symbol: string) => void;
   theme: Theme;
@@ -71,7 +73,7 @@ function StatusDot({ ok, label, title }: { ok: boolean; label: string; title: st
 /** PRD §5 top bar: brand, live status, search (jump to any share, or add an NSE symbol to your list), refresh, learning. */
 export default function TopBar({
   stocks, status, connected, refreshing, onSelect, onAddStock, onRefresh, onOpenLearning,
-  theme, onToggleTheme, onLayoutPreset, onOpenSettings, alertsKey, onAlertSelect,
+  theme, onToggleTheme, onLayoutPreset, onOpenSettings, onOpenLearningSettings, alertsKey, onAlertSelect,
 }: TopBarProps) {
   const [query, setQuery] = useState("");
   const [adding, setAdding] = useState(false);
@@ -190,6 +192,13 @@ export default function TopBar({
           {refreshing ? "Refreshing…" : "Refresh"}
         </button>
         <AlertsBell refreshKey={alertsKey} onSelect={onAlertSelect} />
+        {status?.learning?.paused && (
+          <button onClick={onOpenLearningSettings ?? onOpenSettings}
+            className="px-2 py-1 text-[11px] rounded-md border border-amber-300/50 text-amber-300 hover:bg-amber-300/10"
+            title={`Learning is paused${status.learning.resume_at ? ` until ${new Date(status.learning.resume_at).toLocaleString("en-IN", { weekday: "short", hour: "2-digit", minute: "2-digit" })}` : " until you resume it"} — prices and holding alerts keep running. Click to resume.`}>
+            Learning paused
+          </button>
+        )}
         <button onClick={onOpenSettings} className="btn-secondary px-3 py-1.5 text-xs"
           title={"Settings: AI models, data sources, general options, backup & restore" + (status?.models
             ? `\nChat AI: ${status.models.chat?.name} (${status.models.chat?.model})\nBackground AI: ${status.models.background?.name} (${status.models.background?.model})`

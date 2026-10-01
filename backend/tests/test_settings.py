@@ -106,3 +106,27 @@ def test_backup_delete_and_housekeeping(tmp_path, monkeypatch):
     os.utime(stale, (time.time() - 7200, time.time() - 7200))
     fresh = bs.save_upload(b"y")
     assert not stale.exists() and fresh.exists()
+
+
+def test_source_usefulness_only_judges_clear_moves():
+    from sources_service import read_was_right
+    assert read_was_right(2, 3.1) is True and read_was_right(-1, -2.0) is True
+    assert read_was_right(1, -1.5) is False
+    assert read_was_right(1, 0.3) is None          # too small a move to say anything
+    assert read_was_right(0, 5.0) is None          # neutral reads aren't judged
+
+
+def test_recent_forecasts_count_more_in_a_models_record():
+    from datetime import date, timedelta
+    from types import SimpleNamespace
+    from consensus_engine import reliability
+    from knowledge_service import _weighted
+
+    today = date.today()
+    old_wrong = [SimpleNamespace(prediction_date=today - timedelta(days=360), correct=False)] * 20
+    new_right = [SimpleNamespace(prediction_date=today - timedelta(days=5), correct=True)] * 20
+    w = _weighted(old_wrong + new_right)
+    assert w["whits"] / w["wn"] > 0.9                # a year-old record barely counts against recent form
+    plain, _ = reliability({"n": 40, "hits": 20})
+    recent, why = reliability({"n": 40, "hits": 20, **w})
+    assert recent > plain and why == "20/40 correct overall"   # the text still shows the raw record

@@ -16,6 +16,7 @@ import type {
   DataSourceRow,
   FeedTest,
   GeneralSettings,
+  BackgroundStatus,
   BackupEntry,
   BackupReport,
   LLMProfileInput,
@@ -427,6 +428,20 @@ class ApiService {
     return data;
   }
 
+  async getBackground(): Promise<BackgroundStatus> {
+    const { data } = await this.client.get<BackgroundStatus>("/settings/background");
+    return data;
+  }
+
+  async setBackground(patch: { autostart?: boolean; pause?: "until_resumed" | "until_tomorrow" | "resume" }): Promise<BackgroundStatus> {
+    const { data } = await this.client.put<BackgroundStatus>("/settings/background", patch);
+    return data;
+  }
+
+  async runLearningNow(): Promise<void> {
+    await this.client.post("/learning/run-now");
+  }
+
   async getGeneralSettings(): Promise<GeneralSettings> {
     const { data } = await this.client.get<GeneralSettings>("/settings/general");
     return data;
@@ -509,8 +524,11 @@ class ApiService {
     await this.client.delete(`/llm/profiles/${id}`);
   }
 
-  async setActiveModels(chatProfileId: number, backgroundProfileId: number): Promise<void> {
-    await this.client.put("/llm/active", { chat_profile_id: chatProfileId, background_profile_id: backgroundProfileId });
+  async setActiveModels(chatProfileId: number, backgroundProfileId: number, practiceProfileId?: number | null): Promise<void> {
+    await this.client.put("/llm/active", {
+      chat_profile_id: chatProfileId, background_profile_id: backgroundProfileId,
+      ...(practiceProfileId !== undefined ? { practice_profile_id: practiceProfileId ?? 0 } : {}),
+    });
   }
 
   async listProviderModels(input: { kind: ProviderKind; base_url?: string | null; api_key?: string | null; profile_id?: number | null }): Promise<string[]> {

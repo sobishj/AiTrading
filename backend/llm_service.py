@@ -39,7 +39,8 @@ logger = get_logger(__name__)
 EMBEDDING_DIM = 1536
 _AVAILABILITY_TTL_SECONDS = 30
 IST = timezone(timedelta(hours=5, minutes=30))
-ROLES = ("chat", "background")
+# practice = chart practice on historical charts (defaults to the background model).
+ROLES = ("chat", "background", "practice")
 
 # Re-exported for callers/tests that import it from here.
 __all__ = ["llm_service", "clean_output", "ungrounded_numbers", "record_usage", "LLMService"]
@@ -149,8 +150,12 @@ class LLMService:
                     cfg.chat_profile_id = first.id
                 if cfg.background_profile_id is None or db.get(LLMProfile, cfg.background_profile_id) is None:
                     cfg.background_profile_id = first.id
-            ids = {"chat": cfg.chat_profile_id if cfg else first.id,
-                   "background": cfg.background_profile_id if cfg else first.id}
+            background_id = cfg.background_profile_id if cfg else first.id
+            practice_id = cfg.practice_profile_id if cfg else None
+            if practice_id is not None and db.get(LLMProfile, practice_id) is None:
+                practice_id = None
+            ids = {"chat": cfg.chat_profile_id if cfg else first.id, "background": background_id,
+                   "practice": practice_id or background_id}
             for role, profile_id in ids.items():
                 p = db.get(LLMProfile, profile_id)
                 self._active[role] = ActiveProfile(
@@ -185,7 +190,7 @@ class LLMService:
 
     def practice_allowed(self) -> bool:
         """Chart practice makes hundreds of calls; only profiles marked for it (local by default) may run it."""
-        p = self.active("background")
+        p = self.active("practice")
         return bool(p and p.allow_practice)
 
     def describe(self) -> dict:

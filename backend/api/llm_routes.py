@@ -55,6 +55,8 @@ class ProbeRequest(BaseModel):
 class ActiveRequest(BaseModel):
     chat_profile_id: int
     background_profile_id: int
+    # None = practice on the background model; 0 is treated the same.
+    practice_profile_id: Optional[int] = None
 
 
 def _payload(p: LLMProfile) -> dict:
@@ -100,6 +102,7 @@ async def list_profiles(db: Session = Depends(get_db)):
     rows = db.query(LLMProfile).order_by(LLMProfile.id).all()
     return {"profiles": [_payload(p) for p in rows],
             "chat_profile_id": cfg.chat_profile_id, "background_profile_id": cfg.background_profile_id,
+            "practice_profile_id": cfg.practice_profile_id,
             "chat_available": await llm_service.is_available("chat"),
             "background_available": await llm_service.is_available("background")}
 
@@ -316,6 +319,11 @@ async def set_active(payload: ActiveRequest, db: Session = Depends(get_db)):
     cfg: AppSettings = ranking_service.get_or_create_settings(db)
     cfg.chat_profile_id = payload.chat_profile_id
     cfg.background_profile_id = payload.background_profile_id
+    if "practice_profile_id" in payload.model_fields_set:
+        pid = payload.practice_profile_id or None
+        if pid is not None and db.get(LLMProfile, pid) is None:
+            raise HTTPException(status_code=404, detail=f"Model profile {pid} not found")
+        cfg.practice_profile_id = pid
     db.commit()
     llm_service.reload_profiles()
     return llm_service.describe()

@@ -72,7 +72,8 @@ PRICE_BLOG_RE = re.compile(
 )
 NEWS_LOOKBACK_HOURS = 72
 MIN_NEW_GRADES_FOR_REFLECTION = 3        # new live grades that trigger a review
-PRACTICE_GRADES_PER_REFLECTION = 20      # ...or this many new practice grades
+PRACTICE_GRADES_PER_REFLECTION = 100     # ...or this many new practice grades (a free local model can practise
+                                         # hundreds a night; each review is one call to the background model)
 MAX_LESSONS = 8
 REFLECTION_LIVE_CASES = 12               # latest graded live forecasts reviewed (all models)
 REFLECTION_PRACTICE_CASES = 12
@@ -94,6 +95,12 @@ def background_model_name() -> str:
     """The model that actually serves background work right now (it can be switched at runtime)."""
     profile = llm_service.active("background")
     return profile.model if profile else settings.LLM_MODEL
+
+
+def practice_model_name() -> str:
+    """The model doing chart practice (Settings -> AI models; the background model unless chosen)."""
+    profile = llm_service.active("practice")
+    return profile.model if profile else background_model_name()
 
 
 def today_ist() -> date:
@@ -229,6 +236,26 @@ def trade_outcome(entry: float, bars: pd.DataFrame, target: Optional[float], sto
     return out
 
 
+PRICE_DOUBT_PCT = 2.0     # feed close vs NSE's official close on the grading day
+
+
+def price_disagreement(db: Session, symbol: str, bar_date, feed_close: float) -> Optional[str]:
+    """Why a grading price can't be trusted (it disagrees with NSE's official close that day), or None."""
+    from models import NSEDaily
+
+    day = pd.Timestamp(bar_date)
+    day = (day.tz_convert("Asia/Kolkata") if day.tzinfo else day).date()
+    row = (db.query(NSEDaily.close).filter(NSEDaily.symbol == symbol, NSEDaily.trade_date == day,
+                                            NSEDaily.series.in_(("EQ", "BE"))).first())
+    if row is None or not row[0]:
+        return None                       # no official record to compare with: grade as before
+    official = float(row[0])
+    if abs(feed_close / official - 1) * 100 <= PRICE_DOUBT_PCT:
+        return None
+    return (f"price feed close {feed_close:.2f} on {day} disagreed with NSE's official close {official:.2f} "
+            f"by more than {PRICE_DOUBT_PCT:g}%")
+
+
 def apply_outcome(prediction, bars: pd.DataFrame, entry: Optional[float] = None, scale: float = 1.0) -> None:
     """`entry`/`scale` put the stored prices on the bars' scale after a corporate action (see reference_price)."""
     if bars.empty or not prediction.price_at_prediction:
@@ -300,7 +327,8 @@ class AIAnalystService:
                         published = None
                 db.add(AINewsInsight(stock_id=stock.id, headline_key=key, title=item["title"],
                                      link=item.get("link"), published=published, impact=impact,
-                                     reason=reason, model=background_model_name()))
+                                     reason=reason, model=background_model_name(),
+                                     source=(item.get("source") or None) and str(item["source"])[:160]))
                 stored += 1
             db.commit()
         if stored:
@@ -489,8 +517,8 @@ class AIAnalystService:
     async def grade_predictions(self, db: Session) -> int:
         cutoff = today_ist() - timedelta(days=HORIZON_DAYS)  # calendar pre-filter; bars decide
         pending = (db.query(AIPrediction)
-                   .filter(AIPrediction.graded_at.is_(None), AIPrediction.prediction_date <= cutoff,
-                           AIPrediction.kind == "live").all())
+                   .filter(AIPrediction.graded_at.is_(None), AIPrediction.quarantined.is_(None),
+                           AIPrediction.prediction_date <= cutoff, AIPrediction.kind == "live").all())
         graded = 0
         for prediction in pending:
             stock = db.get(Stock, prediction.stock_id)
@@ -508,6 +536,11 @@ class AIAnalystService:
                 continue
             entry, scale = reference_price(candles, prediction.prediction_date, float(prediction.price_at_prediction))
             close = float(after.iloc[prediction.horizon_days - 1]["close"])
+            doubt = price_disagreement(db, stock.symbol, after.iloc[prediction.horizon_days - 1]["date"], close)
+            if doubt:
+                prediction.quarantined = doubt          # never graded on prices that can't be trusted
+                logger.warning("Forecast %s for %s set aside: %s", prediction.id, stock.symbol, doubt)
+                continue
             ret = (close / entry - 1) * 100
             prediction.actual_return_pct = round(ret, 2)
             prediction.actual_direction = classify_return(ret)
@@ -640,7 +673,8 @@ class AIAnalystService:
         graded = (db.query(AIPrediction).filter(AIPrediction.graded_at.isnot(None), AIPrediction.kind == kind,
                                                 AIPrediction.role == "primary")
                   .order_by(AIPrediction.graded_at.asc()).all())
-        total = db.query(AIPrediction).filter(AIPrediction.kind == kind, AIPrediction.role == "primary").count()
+        total = db.query(AIPrediction).filter(AIPrediction.kind == kind, AIPrediction.role == "primary",
+                                              AIPrediction.quarantined.is_(None)).count()
         n = len(graded)
         result = {"total_forecasts": total, "graded": n, "pending": total - n, "hit_rate": None, "brier": None,
                   "baseline_hit_rate": None, "edge": None, "trust_weight": 0.0, "by_week": [],
@@ -795,7 +829,7 @@ class AIAnalystService:
             track_record=self.track_record_text(db, kind="practice"),
             lessons=self.lessons_block(lessons),
         )
-        text = await llm_service.complete(prompt, temperature=0.2, max_tokens=220)
+        text = await llm_service.complete(prompt, temperature=0.2, max_tokens=220, role="practice")
         if text is None:
             return None
         parsed = parse_prediction(text)
@@ -810,7 +844,7 @@ class AIAnalystService:
             direction=parsed["direction"], probability_up=parsed["probability_up"],
             expected_move_pct=parsed["expected_move_pct"], reason=parsed["reason"],
             price_at_prediction=snap.close, strategy=strategy, conviction_at_prediction=snap.technical_score,
-            lessons_version=version, model=background_model_name(), prompt_text=prompt, raw_response=text,
+            lessons_version=version, model=practice_model_name(), prompt_text=prompt, raw_response=text,
             actual_return_pct=round(ret, 2), actual_direction=classify_return(ret),
             correct=is_correct(parsed["direction"], ret), graded_at=datetime.utcnow(),
         )

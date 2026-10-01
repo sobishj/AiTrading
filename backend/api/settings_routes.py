@@ -2,7 +2,7 @@
 Settings window: data sources, general settings, backup & restore, and per-model cost estimates.
 """
 import asyncio
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
@@ -37,7 +37,11 @@ class SourceUpdate(BaseModel):
 def _source_payload(s: DataSource) -> dict:
     return {"id": s.id, "kind": s.kind, "name": s.name, "url": s.url, "enabled": s.enabled, "builtin": s.builtin,
             "notes": s.notes, "last_ok_at": s.last_ok_at.isoformat() + "Z" if s.last_ok_at else None,
-            "last_error": s.last_error, "last_items": s.last_items}
+            "last_error": s.last_error, "last_items": s.last_items,
+            "usefulness": ({"n": s.usefulness_n, "hits": s.usefulness_hits,
+                            "rate": round(s.usefulness_hits / s.usefulness_n * 100, 1) if s.usefulness_n else None,
+                            "judged": (s.usefulness_n or 0) >= 30}
+                           if s.usefulness_at is not None else None)}
 
 
 @router.get("/sources")
@@ -260,3 +264,85 @@ async def backup_restore(payload: RestoreRequest):
         return await asyncio.to_thread(restore, backup_path(payload.name))
     except BackupError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
+
+
+# ---------------------------------------------------------------------------
+# Background learning: start with Windows, pause/resume, learn now
+# ---------------------------------------------------------------------------
+class BackgroundRequest(BaseModel):
+    autostart: Optional[bool] = None
+    # "until_resumed" | "until_tomorrow" | "resume"
+    pause: Optional[str] = None
+
+
+def _next_jobs(now_ist: datetime) -> list[dict]:
+    """The next scheduled learning jobs (weekdays, IST)."""
+    from config import settings as cfg
+    from preferences import general
+
+    prefs = general()
+    times = [("Pick today's best shares", prefs["universe_screen_time"]) if prefs["discovery_enabled"] else None,
+             ("AI forecasts", cfg.AI_FORECAST_TIME), ("Learning cycle (grade, lessons)", cfg.POST_MARKET_LEARNING_TIME)]
+    out = []
+    for label, hhmm in filter(None, times):
+        h, m = (int(x) for x in hhmm.split(":"))
+        day = now_ist
+        for _ in range(8):
+            at = day.replace(hour=h, minute=m, second=0, microsecond=0)
+            if at.weekday() < 5 and at > now_ist:
+                out.append({"job": label, "at": at.isoformat()})
+                break
+            day = (day + timedelta(days=1)).replace(hour=0, minute=0)
+    return sorted(out, key=lambda j: j["at"])
+
+
+@router.get("/settings/background")
+async def get_background():
+    from background_service import autostart_enabled, under_runner
+    from preferences import learning_state
+
+    from ai_analyst_service import IST
+    state = learning_state()
+    return {"autostart": autostart_enabled(), "under_runner": under_runner(), "paused": state["paused"],
+            "resume_at": state["resume_at"].isoformat() + "Z" if state["resume_at"] else None,
+            "last_learning_at": state["last_learning_at"].isoformat() + "Z" if state["last_learning_at"] else None,
+            "next_jobs": [] if state["paused"] else _next_jobs(datetime.now(IST))}
+
+
+@router.put("/settings/background")
+async def put_background(payload: BackgroundRequest, db: Session = Depends(get_db)):
+    from ai_analyst_service import IST
+    from background_service import set_autostart
+    from ranking_service import ranking_service
+
+    if payload.autostart is not None:
+        try:
+            set_autostart(payload.autostart)
+        except (OSError, RuntimeError) as exc:
+            raise HTTPException(status_code=500, detail=str(exc))
+    if payload.pause is not None:
+        cfg = ranking_service.get_or_create_settings(db)
+        if payload.pause == "resume":
+            cfg.learning_paused, cfg.learning_resume_at = False, None
+        elif payload.pause in ("until_resumed", "until_tomorrow"):
+            cfg.learning_paused = True
+            if payload.pause == "until_tomorrow":
+                # Back on before tomorrow's first job (07:30 IST), so the day's pick isn't missed.
+                tomorrow = (datetime.now(IST) + timedelta(days=1)).replace(hour=7, minute=30, second=0, microsecond=0)
+                cfg.learning_resume_at = tomorrow.astimezone(timezone.utc).replace(tzinfo=None)
+            else:
+                cfg.learning_resume_at = None
+        else:
+            raise HTTPException(status_code=422, detail="pause must be until_resumed, until_tomorrow or resume")
+        db.commit()
+    return await get_background()
+
+
+@router.post("/learning/run-now", status_code=202)
+async def learning_run_now():
+    """Run the learning cycle now (grade matured forecasts, update statistics, rewrite lessons)."""
+    async def job() -> None:
+        from main import run_learning_now
+        await run_learning_now(trigger="manual")
+    asyncio.create_task(job())
+    return {"status": "started"}

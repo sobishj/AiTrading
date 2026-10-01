@@ -195,6 +195,20 @@ export default function ModelSettingsModal({ onClose, onChanged, embedded = fals
     }
   };
 
+  const setPractice = async (id: number | null) => {
+    if (!data) return;
+    const previous = data;
+    setData({ ...data, practice_profile_id: id });
+    try {
+      await apiService.setActiveModels(data.chat_profile_id!, data.background_profile_id!, id);
+      onChanged();
+      load();
+    } catch (e) {
+      setData(previous);
+      setMessage({ ok: false, text: `Could not switch the practice model: ${e instanceof Error ? e.message : "backend not reachable"}` });
+    }
+  };
+
   const startNew = (preset: LLMPreset) => {
     setChoosing(false);
     setModels([]);
@@ -340,6 +354,7 @@ export default function ModelSettingsModal({ onClose, onChanged, embedded = fals
   };
 
   const bgProfile = byId(data?.background_profile_id ?? null);
+  const practiceProfile = byId(data?.practice_profile_id ?? null) ?? bgProfile;
 
   const content = (
       <div className={embedded ? "space-y-5" : "glass-panel bg-base-900/95 max-w-3xl w-full max-h-[88vh] overflow-y-auto p-6 space-y-5"}
@@ -383,8 +398,25 @@ export default function ModelSettingsModal({ onClose, onChanged, embedded = fals
             </p>
           );
         })()}
-        {bgProfile && !bgProfile.allow_practice && (
-          <p className="text-[11px] text-amber-300">Chart practice is paused: the background model isn't allowed to run it (it makes hundreds of calls a day). Enable "Allow chart practice" on it to change that.</p>
+        {data && (
+          <label className="block space-y-1 text-xs text-slate-400">
+            <span className="flex items-center gap-1">
+              Chart practice (market closed: nights &amp; weekends)
+              <InfoTip>Practice replays old charts with the date hidden; each call is graded at once against what really
+                happened, and the results feed the shared lessons every model reads. It makes hundreds of calls a night, so
+                a free local model is the natural choice — the background model can stay a paid one. Practice never earns a
+                model any weight in the rankings (it has no news and could be subtly optimistic); only live forecasts do.</InfoTip>
+            </span>
+            <select value={data.practice_profile_id ?? ""} className={input}
+              onChange={(e) => setPractice(e.target.value ? Number(e.target.value) : null)}>
+              <option value="">Same as background work{bgProfile ? ` (${bgProfile.name})` : ""}</option>
+              {data.profiles.map((p) => <option key={p.id} value={p.id}>{p.name} — {p.model}</option>)}
+            </select>
+            {practiceProfile && !practiceProfile.allow_practice && (
+              <span className="block text-[11px] text-amber-300">Practice is off: {practiceProfile.name} isn't allowed to
+                practise (hundreds of calls a day). Pick a local model here, or tick "Allow chart practice" on it.</span>
+            )}
+          </label>
         )}
 
         <section className="glass-panel p-3 space-y-2">

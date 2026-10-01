@@ -40,7 +40,7 @@ from config import settings
 from data_provider import yahoo_provider
 from discovery_service import discovery_service
 from nse_service import nse_service
-from preferences import general
+from preferences import general, learning_active
 from database import db_session, init_db
 from kite_service import kite_service
 from learning_service import learning_service
@@ -63,7 +63,7 @@ _background_tasks: list[asyncio.Task] = []
 # ---------------------------------------------------------------------------
 def enqueue_ai_news(pairs: list) -> None:
     """Queue Qwen reads for (stock, headline) pairs; stocks are re-loaded inside the job's own session."""
-    if not settings.AI_ANALYST_ENABLED or not pairs:
+    if not settings.AI_ANALYST_ENABLED or not pairs or not learning_active():
         return
     items = [(stock.id, item) for stock, item in pairs]
 
@@ -123,9 +123,10 @@ async def _practice_loop() -> None:
         try:
             await asyncio.sleep(30)
             if (not settings.AI_ANALYST_ENABLED or market_is_open() or not llm_service.idle
+                    or not learning_active()
                     or llm_service.seconds_since_interactive() < INTERACTIVE_COOLDOWN_SECONDS
                     or not llm_service.practice_allowed()
-                    or not await llm_service.is_available("background")):
+                    or not await llm_service.is_available("practice")):
                 continue
             with db_session() as db:
                 if (not ai_analyst_service.practice_enabled(db)
@@ -178,8 +179,11 @@ async def run_factor_study(force: bool = False, delay: float = 0) -> None:
     try:
         if delay:
             await asyncio.sleep(delay)
+        if not force and not learning_active():
+            return
         from knowledge_service import knowledge_service
         with db_session() as db:
+            await nse_service.backfill_history(db)     # a year of NSE records, so delivery's edge is measured
             result = await knowledge_service.history_study(db, force=force)
         if not result.get("skipped"):
             await connection_manager.broadcast({"type": "learning_update", "factor_study": result})
@@ -190,7 +194,7 @@ async def run_factor_study(force: bool = False, delay: float = 0) -> None:
 
 
 def enqueue_ai_reflection(force: bool = False) -> None:
-    if not settings.AI_ANALYST_ENABLED:
+    if not settings.AI_ANALYST_ENABLED or (not force and not learning_active()):
         return
 
     async def job() -> None:
@@ -210,7 +214,7 @@ async def _startup_discovery() -> None:
         return
     from models import UniverseScreen
     await asyncio.sleep(90)   # let startup settle (and the scheduler run first if it is already due)
-    if discovery_service.running:
+    if discovery_service.running or not learning_active():
         return
     now = datetime.now(IST)
     with db_session() as db:
@@ -243,6 +247,27 @@ async def run_discovery(trigger: str = "scheduled", delay: float = 0) -> None:
 
 
 _SCHEDULER_POLL_SECONDS = 30
+
+
+async def run_learning_now(trigger: str = "scheduled") -> dict:
+    """
+    The learning cycle: grade everything that has matured against real prices, update track records,
+    pattern statistics and ranking weights, then rewrite the shared lessons and refresh the factor study.
+    """
+    with db_session() as db:
+        result = await learning_service.run_learning_cycle(db)
+        cfg = ranking_service.get_or_create_settings(db)
+        cfg.last_learning_at = datetime.utcnow()
+        db.commit()
+    logger.info("Learning cycle (%s): graded=%s ai_forecasts_graded=%s recalibration=%s", trigger,
+                result["graded"], result["ai_forecasts_graded"], result["recalibration"]["status"])
+    await connection_manager.broadcast({"type": "learning_update", "graded": result["graded"]})
+    force = trigger == "manual"
+    enqueue_ai_reflection(force=force)
+    asyncio.create_task(run_factor_study())
+    from trader_profile_service import refresh_in_background
+    asyncio.create_task(refresh_in_background())   # after-the-fact outcomes of your own trades
+    return {"graded": result["graded"], "ai_forecasts_graded": result["ai_forecasts_graded"]}
 
 
 async def _ranking_refresh_loop() -> None:
@@ -345,6 +370,18 @@ def _parse_hhmm(value: str, default: dtime) -> dtime:
         return default
 
 
+def _last_learning_date():
+    """IST date of the last learning cycle (from the database), or None."""
+    try:
+        with db_session() as db:
+            cfg = ranking_service.get_or_create_settings(db)
+            if cfg.last_learning_at:
+                return cfg.last_learning_at.replace(tzinfo=timezone.utc).astimezone(IST).date()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Last learning time unavailable: %s", exc)
+    return None
+
+
 async def _daily_scheduler_loop() -> None:
     """Morning Brief and post-market learning, once per weekday each (IST)."""
     brief_at = _parse_hhmm(settings.MORNING_BRIEF_TIME, dtime(8, 30))
@@ -352,7 +389,7 @@ async def _daily_scheduler_loop() -> None:
     forecast_at = _parse_hhmm(settings.AI_FORECAST_TIME, dtime(8, 45))
     last_screen_date = None
     last_brief_date = None
-    last_learning_date = None
+    last_learning_date = _last_learning_date()   # a restart doesn't repeat today's learning cycle
     last_forecast_date = None
     outlook_times = [_parse_hhmm(t.strip(), dtime(20, 0)) for t in settings.AI_OUTLOOK_TIMES.split(",") if t.strip()]
     last_outlook_run: set[tuple] = set()
@@ -365,11 +402,13 @@ async def _daily_scheduler_loop() -> None:
                 # Within 10 minutes after each slot, once per slot per day (any day: it targets the next session).
                 start = datetime.combine(now.date(), at, IST)
                 if key not in last_outlook_run and start <= now <= start + timedelta(minutes=10):
-                    enqueue_ai_outlook()
+                    if learning_active():
+                        enqueue_ai_outlook()
                     last_outlook_run.add(key)
+            active = learning_active()   # paused: research/learning jobs wait (and run on resume, same day)
             if now.weekday() < 5:
                 prefs = general()       # read each pass: Settings -> General changes apply without a restart
-                if (prefs["discovery_enabled"] and last_screen_date != now.date()
+                if (active and prefs["discovery_enabled"] and last_screen_date != now.date()
                         and now.time() >= _parse_hhmm(prefs["universe_screen_time"], dtime(8, 20))):
                     with db_session() as db:
                         done = discovery_service.ran_today(db)
@@ -390,21 +429,13 @@ async def _daily_scheduler_loop() -> None:
                     last_brief_date = now.date()
                 # Forecasts follow discovery: its AI review already forecast the shortlist, and the
                 # top 10 should come from today's list, so wait while it is still running.
-                if (last_forecast_date != now.date() and now.time() >= forecast_at
+                if (active and last_forecast_date != now.date() and now.time() >= forecast_at
                         and not discovery_service.running):
                     # Idempotent: stocks already forecast today are skipped.
                     enqueue_ai_forecasts()
                     last_forecast_date = now.date()
-                if last_learning_date != now.date() and now.time() >= learn_at:
-                    with db_session() as db:
-                        result = await learning_service.run_learning_cycle(db)
-                    logger.info("Post-market learning: graded=%s ai_forecasts_graded=%s recalibration=%s",
-                                result["graded"], result["ai_forecasts_graded"], result["recalibration"]["status"])
-                    await connection_manager.broadcast({"type": "learning_update", "graded": result["graded"]})
-                    enqueue_ai_reflection()
-                    asyncio.create_task(run_factor_study())
-                    from trader_profile_service import refresh_in_background
-                    asyncio.create_task(refresh_in_background())   # after-the-fact outcomes of your own trades
+                if active and last_learning_date != now.date() and now.time() >= learn_at:
+                    await run_learning_now()
                     last_learning_date = now.date()
         except asyncio.CancelledError:
             raise
@@ -426,6 +457,7 @@ async def lifespan(app: FastAPI):
     from sources_service import sources_service
     with db_session() as db:
         sources_service.seed(db)          # built-in news feeds and NSE sources (Settings -> Data sources)
+        nse_service.load_delivery_edges(db)   # what high-delivery days were measured to predict
     llm_service.reload_profiles()
     llm_service.start_worker()
     if settings.AI_ANALYST_ENABLED:
@@ -469,6 +501,10 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    # Chrome's Private Network Access check: before some requests from the page (port 5173) to this local
+    # backend it sends a preflight that must be answered "allowed", or the request intermittently fails
+    # (seen as settings that sometimes don't save).
+    allow_private_network=True,
 )
 
 

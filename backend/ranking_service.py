@@ -80,7 +80,10 @@ TIMING_NOTE_THRESHOLD = 2.0
 # Official NSE data (nse_service). Small, labelled adjustments — information, not a strategy of their own.
 RESULTS_RISK_PENALTY = 3.0        # results board meeting inside the swing window: the price can gap either way
 FO_BAN_PENALTY = 2.0              # open interest above 95% of the limit: crowded, speculative positioning
-DELIVERY_ADJUSTMENT = 2.0         # a move on unusually high delivery (shares actually taken, not day-traded)
+# A move on unusually high delivery (shares actually taken, not day-traded): measured on a year of NSE history.
+DELIVERY_ADJUSTMENT_MAX = 3.0
+DELIVERY_EDGE_PER_POINT = 2.5     # measured edge (percentage points over an ordinary day) per conviction point
+DELIVERY_PRIOR = 1.0              # until the history has measured it
 DELIVERY_RATIO_MIN = 1.3
 
 # No new BUY idea from a still-forming bar until this share of the session has
@@ -342,10 +345,25 @@ class RankingService:
         d = ex.get("delivery") or {}
         ratio, change = d.get("deliv_ratio"), d.get("change_pct")
         if ratio is not None and change is not None and ratio >= DELIVERY_RATIO_MIN and abs(change) >= 0.5:
+            from nse_service import nse_service
             up = change > 0
-            adjustments["delivery"] = DELIVERY_ADJUSTMENT if up else -DELIVERY_ADJUSTMENT
-            item.tags.append(f"{'Up' if up else 'Down'} {abs(change):.1f}% on {d['deliv_pct']:.0f}% delivery "
-                             f"({ratio:.1f}x its 20-day average) — {'real buying' if up else 'real selling'}")
+            edge = nse_service.delivery_edges.get("delivery_buying" if up else "delivery_selling")
+            what = (f"{'Up' if up else 'Down'} {abs(change):.1f}% on {d['deliv_pct']:.0f}% delivery "
+                    f"({ratio:.1f}x its 20-day average)")
+            if edge is None:
+                points, note = DELIVERY_PRIOR, "not yet measured on NSE history"   # weak, labelled prior
+            elif edge["edge"] > 0:
+                # Measured: points in proportion to how much better than an ordinary day it did.
+                points = min(DELIVERY_ADJUSTMENT_MAX, edge["edge"] / DELIVERY_EDGE_PER_POINT)
+                note = (f"historically the price {'rose' if up else 'fell'} over 5 sessions in {edge['rate']:.0f}% "
+                        f"of {edge['n']:,} such cases vs {edge['base']:.0f}% for any day")
+            else:
+                points = 0.0
+                note = (f"historically no edge ({edge['rate']:.0f}% of {edge['n']:,} cases vs "
+                        f"{edge['base']:.0f}% for any day)")
+            if points:
+                adjustments["delivery"] = round(points if up else -points, 2)
+            item.tags.append(f"{what} — {note}")
 
     # ------------------------------------------------------------------
     # Ranking run

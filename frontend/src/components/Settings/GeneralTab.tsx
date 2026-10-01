@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import apiService from "../../services/api";
 import type { GeneralSettings } from "../../services/types";
 import InfoTip from "../common/InfoTip";
+import BackgroundLearning from "./BackgroundLearning";
 
 type Values = Omit<GeneralSettings, "defaults">;
 
@@ -10,7 +11,7 @@ const errorText = (e: unknown) =>
   ?? (e instanceof Error ? e.message : "Something went wrong");
 
 /** Settings -> General: how the daily pick works. Saved in the database, so a backup carries them. */
-export default function GeneralTab() {
+export default function GeneralTab({ onChanged = () => {} }: { onChanged?: () => void }) {
   const [saved, setSaved] = useState<GeneralSettings | null>(null);
   const [form, setForm] = useState<Values | null>(null);
   const [message, setMessage] = useState<{ ok: boolean; text: string } | null>(null);
@@ -50,6 +51,7 @@ export default function GeneralTab() {
 
   return (
     <div className="space-y-5">
+      <BackgroundLearning onChanged={onChanged} />
       <section className="space-y-3">
         <h4 className="text-xs uppercase tracking-widest text-slate-400">Daily pick of the best shares</h4>
         <label className="flex items-center gap-2 text-xs text-slate-300">

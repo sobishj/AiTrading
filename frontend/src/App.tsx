@@ -224,6 +224,7 @@ export default function App() {
             onRefresh={handleRefresh}
             onOpenLearning={() => setLearningOpen(true)}
             onOpenSettings={() => setSettingsTab("models")}
+            onOpenLearningSettings={() => setSettingsTab("general")}
             alertsKey={alertsKey}
             onAlertSelect={(symbol) => {
               handleSelect(symbol);

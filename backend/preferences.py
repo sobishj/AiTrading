@@ -72,3 +72,29 @@ def validate(payload: dict) -> dict:
     if out.get("ai_review_shortlist", 0) > out.get("auto_list_size", 10 ** 6):
         raise ValueError("The AI review shortlist can't be larger than the Auto list")
     return out
+
+
+# ---------------------------------------------------------------------------
+# Background learning: pause / resume
+# ---------------------------------------------------------------------------
+def learning_state() -> dict:
+    """{paused, resume_at, last_learning_at}; a pause whose resume time has passed ends by itself."""
+    from datetime import datetime
+    try:
+        from database import db_session
+        from models import AppSettings
+        with db_session() as db:
+            row = db.get(AppSettings, 1)
+            if row is None:
+                return {"paused": False, "resume_at": None, "last_learning_at": None}
+            if row.learning_paused and row.learning_resume_at and datetime.utcnow() >= row.learning_resume_at:
+                row.learning_paused, row.learning_resume_at = False, None
+            return {"paused": bool(row.learning_paused), "resume_at": row.learning_resume_at,
+                    "last_learning_at": row.last_learning_at}
+    except Exception:  # noqa: BLE001  (DB unavailable: report running; jobs fail on their own)
+        return {"paused": False, "resume_at": None, "last_learning_at": None}
+
+
+def learning_active() -> bool:
+    """False while you've paused learning (Settings -> General); prices and holding alerts ignore this."""
+    return not learning_state()["paused"]

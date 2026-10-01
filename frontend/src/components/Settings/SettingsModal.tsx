@@ -43,7 +43,7 @@ export default function SettingsModal({ initialTab = "models", onClose, onChange
         <div className="flex-1 overflow-y-auto p-6">
           {tab === "models" && <ModelSettingsModal embedded onClose={onClose} onChanged={onChanged} />}
           {tab === "sources" && <SourcesTab />}
-          {tab === "general" && <GeneralTab />}
+          {tab === "general" && <GeneralTab onChanged={onChanged} />}
           {tab === "backup" && <BackupTab onRestored={onChanged} />}
         </div>
       </div>
