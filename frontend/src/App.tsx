@@ -223,7 +223,7 @@ export default function App() {
             onAddStock={handleAddToManual}
             onRefresh={handleRefresh}
             onOpenLearning={() => setLearningOpen(true)}
-            onOpenSettings={() => setSettingsTab("sources")}
+            onOpenSettings={() => setSettingsTab("models")}
             alertsKey={alertsKey}
             onAlertSelect={(symbol) => {
               handleSelect(symbol);

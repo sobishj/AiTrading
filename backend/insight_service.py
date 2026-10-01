@@ -7,7 +7,7 @@ Turns a RankedStock into the explanations the UI and chat need:
 """
 import re
 import time
-from datetime import datetime
+from datetime import date, datetime, timedelta, timezone
 from typing import Optional
 
 from sqlalchemy.orm import Session
@@ -33,6 +33,26 @@ ADJUSTMENT_LABELS = {
     "fo_ban": "In NSE's F&O ban list (crowded positioning)",
     "delivery": "Move backed by unusually high delivery (NSE bhavcopy)",
 }
+
+
+CHAT_IST = timezone(timedelta(hours=5, minutes=30))
+
+
+def today_ist() -> date:
+    return datetime.now(CHAT_IST).date()
+
+
+def ist_day_bounds(day: date) -> tuple[datetime, datetime]:
+    """[start, end) of an IST calendar day as naive UTC datetimes (how chat timestamps are stored)."""
+    start = datetime.combine(day, datetime.min.time(), CHAT_IST).astimezone(timezone.utc).replace(tzinfo=None)
+    return start, start + timedelta(days=1)
+
+
+def chat_days(db: Session) -> list[str]:
+    """IST dates (YYYY-MM-DD) that have at least one chat message, newest first."""
+    stamps = db.query(UserChat.timestamp).all()
+    days = {(ts.replace(tzinfo=timezone.utc).astimezone(CHAT_IST)).date().isoformat() for (ts,) in stamps}
+    return sorted(days, reverse=True)
 
 
 class InsightService:
@@ -200,8 +220,14 @@ class InsightService:
     # Chat grounding
     # ------------------------------------------------------------------
     def chat_history(self, db: Session, limit: int = CHAT_HISTORY_TURNS) -> list[tuple[str, str, Optional[str]]]:
-        """Recent (user, assistant, "Name (SYMBOL)" that was open) turns, oldest first."""
-        rows = db.query(UserChat).order_by(UserChat.timestamp.desc()).limit(limit).all()
+        """
+        Today's recent (user, assistant, "Name (SYMBOL)" that was open) turns, oldest first.
+        Chat is per day: each day starts a fresh conversation, so yesterday's prices and
+        answers never leak into today's.
+        """
+        start, end = ist_day_bounds(today_ist())
+        rows = (db.query(UserChat).filter(UserChat.timestamp >= start, UserChat.timestamp < end)
+                .order_by(UserChat.timestamp.desc()).limit(limit).all())
         symbols = {r.stock_context for r in rows if r.stock_context}
         names = {s.symbol: s.name for s in db.query(Stock).filter(Stock.symbol.in_(symbols)).all()} if symbols else {}
         return [

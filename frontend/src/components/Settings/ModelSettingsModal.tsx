@@ -61,6 +61,7 @@ export default function ModelSettingsModal({ onClose, onChanged, embedded = fals
   const [data, setData] = useState<LLMProfilesResponse | null>(null);
   const [presets, setPresets] = useState<LLMPreset[]>([]);
   const [draft, setDraft] = useState<Draft | null>(null);
+  const [choosing, setChoosing] = useState(false);   // the "Add a model" provider picker is open
   const [models, setModels] = useState<string[]>([]);
   const [busy, setBusy] = useState<string | null>(null);
   const [message, setMessage] = useState<{ ok: boolean; text: string } | null>(null);
@@ -195,6 +196,7 @@ export default function ModelSettingsModal({ onClose, onChanged, embedded = fals
   };
 
   const startNew = (preset: LLMPreset) => {
+    setChoosing(false);
     setModels([]);
     setMessage(null);
     setDraft({ name: preset.name, kind: preset.kind, base_url: preset.base_url, api_key: preset.api_key,
@@ -425,7 +427,12 @@ export default function ModelSettingsModal({ onClose, onChanged, embedded = fals
         </section>
 
         <section className="space-y-2">
-          <h4 className="text-xs uppercase tracking-widest text-slate-400">Saved models</h4>
+          <div className="flex items-center justify-between">
+            <h4 className="text-xs uppercase tracking-widest text-slate-400">Saved models</h4>
+            <button onClick={() => { setMessage(null); setChoosing(true); }} className="btn-primary text-xs px-3 py-1.5">
+              + Add model
+            </button>
+          </div>
           {data?.profiles.map((p) => (
             <div key={p.id} className={`glass-panel px-3 py-2 flex items-center gap-3 ${p.enabled ? "" : "opacity-60"}`}>
               <input type="checkbox" checked={p.enabled} onChange={() => toggleEnabled(p)}
@@ -459,19 +466,43 @@ export default function ModelSettingsModal({ onClose, onChanged, embedded = fals
               <button onClick={() => remove(p)} className="text-xs text-slate-500 hover:text-neon-rose">Delete</button>
             </div>
           ))}
-          <div className="flex flex-wrap gap-1.5 pt-1">
-            <span className="text-xs text-slate-400 self-center mr-1">Add:</span>
-            {presets.map((p) => (
-              <button key={p.key} onClick={() => startNew(p)} className="text-[11px] px-2 py-1 rounded-full border border-white/10 text-slate-300 hover:border-neon-blue/40 hover:text-neon-blue">
-                {p.name}
-              </button>
-            ))}
-          </div>
         </section>
 
+        {choosing && (
+          <div className="fixed inset-0 z-[60] bg-black/60 backdrop-blur-sm flex items-center justify-center p-6"
+            onClick={() => setChoosing(false)}>
+            <section role="dialog" aria-label="Add a model" onClick={(e) => e.stopPropagation()}
+              className="glass-panel bg-base-900/95 max-w-xl w-full p-5 space-y-4">
+              <div className="flex items-center justify-between">
+                <h4 className="text-base font-semibold">Add a model</h4>
+                <button onClick={() => setChoosing(false)} className="text-slate-500 hover:text-slate-200" aria-label="Close">✕</button>
+              </div>
+              {(["Local (free, runs on this PC)", "Cloud (paid API)"] as const).map((group, gi) => (
+                <div key={group} className="space-y-2">
+                  <div className="text-[11px] uppercase tracking-widest text-slate-500">{group}</div>
+                  <div className="grid grid-cols-2 gap-2">
+                    {presets.filter((p) => p.name.startsWith("Local — ") === (gi === 0)).map((p) => (
+                      <button key={p.key} onClick={() => startNew(p)} title={p.notes}
+                        className="text-left text-sm px-3 py-2 rounded-lg border border-white/10 text-slate-200 hover:border-neon-blue/40 hover:text-neon-blue">
+                        {p.name.replace(/^Local — /, "")}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              ))}
+            </section>
+          </div>
+        )}
+
         {draft && (
-          <section className="glass-panel p-4 space-y-3 border-neon-blue/20">
-            <h4 className="text-sm font-semibold">{draft.id ? `Edit ${draft.name}` : `New model — ${draft.name}`}</h4>
+          <div className="fixed inset-0 z-[60] bg-black/60 backdrop-blur-sm flex items-center justify-center p-6"
+            onClick={() => busy === null && setDraft(null)}>
+          <section role="dialog" aria-label={draft.id ? `Edit ${draft.name}` : "New model"} onClick={(e) => e.stopPropagation()}
+            className="glass-panel bg-base-900/95 max-w-3xl w-full max-h-[90vh] overflow-y-auto p-5 space-y-3">
+            <div className="flex items-center justify-between">
+              <h4 className="text-base font-semibold">{draft.id ? `Edit ${draft.name}` : `New model — ${draft.name}`}</h4>
+              <button onClick={() => setDraft(null)} disabled={busy !== null} className="text-slate-500 hover:text-slate-200" aria-label="Close">✕</button>
+            </div>
             {draft.notes && <p className="text-[11px] text-slate-400">{draft.notes}</p>}
             <div className="grid md:grid-cols-2 gap-3">
               <label className="text-xs text-slate-400 space-y-1"><span className="block">Name<InfoTip>Your own label for this model, shown in the dropdowns and in each analysis. Change it freely — the record of a model's accuracy follows the model id, not this name.</InfoTip></span>
@@ -535,6 +566,7 @@ export default function ModelSettingsModal({ onClose, onChanged, embedded = fals
             </div>
             <p className="text-[10px] text-slate-600">API keys are saved in Windows Credential Manager (not in the database, files or browser) and are never shown again in full. Local runtimes (Bionic, LM Studio, Ollama, vLLM…) only need their URL and model; the key is optional.</p>
           </section>
+          </div>
         )}
         {!draft && message && <p className={`text-xs ${message.ok ? "text-neon-emerald" : "text-neon-rose"}`}>{message.text}</p>}
 

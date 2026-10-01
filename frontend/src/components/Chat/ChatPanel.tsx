@@ -1,6 +1,7 @@
 import { FormEvent, useEffect, useRef, useState } from "react";
 import { useChat } from "../../hooks/useChat";
 import apiService from "../../services/api";
+import ChatCalendar from "./ChatCalendar";
 import Markdown from "./Markdown";
 import TradeProposalCard from "./TradeProposalCard";
 
@@ -16,7 +17,11 @@ interface ChatPanelProps {
 
 /** PRD §10: ChatGPT-style Trading Coach that remembers the conversation and sees the live market. */
 export default function ChatPanel({ symbol, name, topName, secondName, llmAvailable, onTradeRecorded }: ChatPanelProps) {
-  const { messages, sending, error, sendMessage, clear } = useChat(symbol);
+  // The chat is per day: null = today; a past day is shown read-only.
+  const [day, setDay] = useState<string | null>(null);
+  const { messages, sending, loading, error, today, chatDays, sendMessage, clearDay } = useChat(symbol, day);
+  const viewing = day ?? today;
+  const isToday = viewing === today;
   const [input, setInput] = useState("");
   const scrollRef = useRef<HTMLDivElement>(null);
   // The model chosen for chat right now (AI models → "Chat & analyst notes"), for the "thinking" line.
@@ -39,8 +44,14 @@ export default function ChatPanel({ symbol, name, topName, secondName, llmAvaila
     "What's the market mood today?",
   ].filter(Boolean) as string[];
 
+  const dayLabel = isToday ? "today's chat"
+    : `the chat of ${new Date(`${viewing}T00:00:00`).toLocaleDateString("en-IN", { day: "numeric", month: "short", year: "numeric" })}`;
+  const confirmClear = () => {
+    if (window.confirm(`Delete ${dayLabel}? Other days are kept. This can't be undone.`)) clearDay();
+  };
+
   const submit = (text: string) => {
-    if (!text.trim() || sending) return;
+    if (!text.trim() || sending || !isToday) return;
     setInput("");
     loadChatModel();   // the model may have been switched since the panel opened
     sendMessage(text);
@@ -58,15 +69,22 @@ export default function ChatPanel({ symbol, name, topName, secondName, llmAvaila
         <div className="flex items-center gap-3">
           {!llmAvailable && <span className="text-[11px] text-neon-rose">model offline</span>}
           {messages.length > 0 && (
-            <button onClick={() => clear()} className="text-[11px] text-slate-500 hover:text-slate-300">
-              New chat
+            <button onClick={confirmClear} className="text-[11px] text-slate-500 hover:text-neon-rose"
+              title={`Delete ${dayLabel} (other days are kept)`}>
+              Clear day
             </button>
           )}
+          <ChatCalendar value={viewing} today={today} chatDays={chatDays}
+            onChange={(d) => setDay(d === today ? null : d)} />
         </div>
       </div>
 
       <div ref={scrollRef} className="flex-1 overflow-y-auto p-4 space-y-3">
-        {messages.length === 0 && (
+        {loading && messages.length === 0 && <p className="text-xs text-slate-500">Loading…</p>}
+        {!loading && messages.length === 0 && !isToday && (
+          <p className="text-xs text-slate-500">No chat on this day.</p>
+        )}
+        {!loading && messages.length === 0 && isToday && (
           <div className="space-y-3">
             <p className="text-xs text-slate-500">
               Ask about the ranking, a setup, or your trades. I can see the live ranking, trade plans, news and
@@ -113,6 +131,12 @@ export default function ChatPanel({ symbol, name, topName, secondName, llmAvaila
         {error && <div className="text-xs text-neon-rose">{error}</div>}
       </div>
 
+      {!isToday ? (
+        <div className="p-3 border-t border-white/5 flex items-center justify-between gap-2 text-xs text-slate-500">
+          <span>Past chats are read-only — new questions go into today's chat.</span>
+          <button onClick={() => setDay(null)} className="btn-secondary px-3 py-1.5 text-xs shrink-0">Back to today</button>
+        </div>
+      ) : (
       <form onSubmit={handleSubmit} className="p-3 border-t border-white/5 flex gap-2">
         <input
           value={input}
@@ -125,6 +149,7 @@ export default function ChatPanel({ symbol, name, topName, secondName, llmAvaila
           Send
         </button>
       </form>
+      )}
     </div>
   );
 }

@@ -169,13 +169,21 @@ class ApiService {
     return data;
   }
 
-  async getChatHistory(limit = 50): Promise<ChatResponse[]> {
-    const { data } = await this.client.get<ChatResponse[]>("/chat/history", { params: { limit } });
+  /** `date` (YYYY-MM-DD, IST) = that day's conversation; without it, the latest `limit` messages. */
+  async getChatHistory(limit = 50, date?: string): Promise<ChatResponse[]> {
+    const { data } = await this.client.get<ChatResponse[]>("/chat/history", { params: date ? { date } : { limit } });
     return data;
   }
 
-  async clearChatHistory(): Promise<void> {
-    await this.client.delete("/chat/history");
+  /** Today's IST date and the days that have chat (for the chat calendar). */
+  async getChatDays(): Promise<{ today: string; days: string[] }> {
+    const { data } = await this.client.get<{ today: string; days: string[] }>("/chat/days");
+    return data;
+  }
+
+  /** Deletes one day's chat when `date` is given, otherwise all chat. */
+  async clearChatHistory(date?: string): Promise<void> {
+    await this.client.delete("/chat/history", { params: date ? { date } : undefined });
   }
 
   async getTradeHistory(limit = 50, source?: string): Promise<TradeHistoryEntry[]> {

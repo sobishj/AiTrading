@@ -361,3 +361,12 @@ def test_provider_request_limits_are_not_reported_as_out_of_credit():
     minute = _openai_error(err([{"quotaId": "GenerateRequestsPerMinutePerProjectPerModel-FreeTier"}]))
     assert minute.retryable and not minute.no_credit
     assert _openai_error(err([], message="insufficient_quota: You exceeded your current quota")).no_credit
+
+
+def test_chat_day_bounds_are_ist_midnight_in_utc():
+    from datetime import date as d
+    from insight_service import ist_day_bounds
+    start, end = ist_day_bounds(d(2026, 10, 1))
+    # 1 Oct 00:00 IST = 30 Sep 18:30 UTC; a chat at 23:59 IST on 1 Oct (18:29 UTC on 1 Oct) is still that day.
+    assert start == datetime(2026, 9, 30, 18, 30) and end == datetime(2026, 10, 1, 18, 30)
+    assert start <= datetime(2026, 10, 1, 18, 29) < end

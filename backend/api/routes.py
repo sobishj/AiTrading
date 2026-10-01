@@ -19,7 +19,7 @@ from analysis_service import analysis_service
 from brief_service import brief_service
 from config import settings
 from database import get_db
-from insight_service import insight_service
+from insight_service import chat_days, insight_service, ist_day_bounds, today_ist
 from kite_service import kite_service
 from learning_service import learning_service
 from llm_service import llm_service
@@ -531,17 +531,43 @@ async def chat(request: ChatMessageRequest, db: Session = Depends(get_db)):
                                answered_by=answered_by)
 
 
+def _chat_day(day: Optional[date]) -> Optional[date]:
+    """A chat day must not be in the future (IST)."""
+    if day is not None and day > today_ist():
+        raise HTTPException(status_code=422, detail="Future dates have no chat.")
+    return day
+
+
 @router.get("/chat/history", response_model=list[ChatMessageResponse])
-async def get_chat_history(limit: int = 50, db: Session = Depends(get_db)):
-    rows = db.query(UserChat).order_by(UserChat.timestamp.desc()).limit(min(limit, 200)).all()
+async def get_chat_history(limit: int = 50, day: Optional[date] = Query(None, alias="date"),
+                           db: Session = Depends(get_db)):
+    """One IST day's conversation (`date=YYYY-MM-DD`, oldest first), or the latest `limit` messages."""
+    query = db.query(UserChat)
+    if _chat_day(day) is not None:
+        start, end = ist_day_bounds(day)
+        rows = (query.filter(UserChat.timestamp >= start, UserChat.timestamp < end)
+                .order_by(UserChat.timestamp).limit(500).all())
+    else:
+        rows = list(reversed(query.order_by(UserChat.timestamp.desc()).limit(min(limit, 200)).all()))
     return [ChatMessageResponse(id=r.id, user_message=r.user_message, ai_response=r.ai_response,
                                 stock_context=r.stock_context, timestamp=r.timestamp, answered_by=r.answered_by)
-            for r in reversed(rows)]
+            for r in rows]
+
+
+@router.get("/chat/days")
+async def get_chat_days(db: Session = Depends(get_db)):
+    """IST dates that have chat, newest first (to mark them in the calendar), plus today's date."""
+    return {"today": today_ist().isoformat(), "days": chat_days(db)}
 
 
 @router.delete("/chat/history", status_code=204)
-async def clear_chat_history(db: Session = Depends(get_db)):
-    db.query(UserChat).delete()
+async def clear_chat_history(day: Optional[date] = Query(None, alias="date"), db: Session = Depends(get_db)):
+    """Delete one IST day's chat (`date=YYYY-MM-DD`); without a date, all chat."""
+    query = db.query(UserChat)
+    if _chat_day(day) is not None:
+        start, end = ist_day_bounds(day)
+        query = query.filter(UserChat.timestamp >= start, UserChat.timestamp < end)
+    query.delete(synchronize_session=False)
     db.commit()
 
 
