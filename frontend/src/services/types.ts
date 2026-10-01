@@ -905,6 +905,8 @@ export interface DiscoveryPick {
   selection_score: number;
   strategy: string | null;
   ai?: { signal: string; probability_up: number; confidence: number; votes: string | null };
+  /** Set when the share reached the AI review through today's signals rather than its data score. */
+  catalyst?: string[];
 }
 
 /** The latest daily discovery run: how the Auto list was chosen from the whole market. */
@@ -924,6 +926,8 @@ export interface DiscoveryStatus {
   top_sectors?: string[];
   /** NSE filings the AI read for the best candidates in this run. */
   filings_read?: number;
+  /** Shares below the shortlist sent to the AI review because of a fresh signal today. */
+  catalysts?: { symbol: string; reasons: string[]; reviewed: boolean }[];
   /** Official NSE sources: last successful fetch (or the error) for filings, calendar, ban, deals, bhavcopy. */
   sources?: Record<string, { ok: boolean; at?: string; error?: string; [k: string]: unknown }>;
   note?: string | null;

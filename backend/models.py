@@ -592,6 +592,7 @@ class UniverseScreen(Base):
     removed_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     top_sectors: Mapped[str | None] = mapped_column(Text, nullable=True)
     filings_read: Mapped[int] = mapped_column(Integer, default=0, server_default="0")   # NSE filings the AI read
+    catalysts_json: Mapped[str | None] = mapped_column(Text, nullable=True)   # [{symbol, reasons}] reviewed via today's signals
     note: Mapped[str | None] = mapped_column(Text, nullable=True)
     seconds: Mapped[float | None] = mapped_column(Numeric, nullable=True)
 

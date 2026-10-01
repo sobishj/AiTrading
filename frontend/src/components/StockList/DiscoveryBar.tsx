@@ -38,6 +38,8 @@ export default function DiscoveryBar({ refreshKey }: { refreshKey: string }) {
     weekday: "short", hour: "2-digit", minute: "2-digit" }) : null;
   const filteredOut = Object.entries(status.filtered ?? {}).sort((a, b) => b[1] - a[1]);
   const aiPicks = (status.selected ?? []).filter((p) => p.ai);
+  const catalysts = status.catalysts ?? [];
+  const caughtToday = (status.selected ?? []).filter((p) => p.catalyst).map((p) => p.symbol);
 
   return (
     <div className="text-[10px] text-slate-400 leading-snug px-1">
@@ -59,7 +61,9 @@ export default function DiscoveryBar({ refreshKey }: { refreshKey: string }) {
             )}
             <span className="block">3. AI review: the best {status.ai_review_shortlist} were analysed by every enabled
               model; a confident combined SELL drops a share for the day, and the AI's probability moves its score
-              by up to ±10.{aiPicks.length ? ` AI view on today's picks: ${aiPicks.slice(0, 5).map((p) =>
+              by up to ±10.{catalysts.length ? ` Also reviewed for today's signals: ${catalysts.map((c) =>
+                `${c.symbol} (${c.reasons.join(", ")})`).join("; ")}${caughtToday.length
+                ? ` — made the list: ${caughtToday.join(", ")}` : ""}.` : ""}{aiPicks.length ? ` AI view on today's picks: ${aiPicks.slice(0, 5).map((p) =>
                 `${p.symbol} ${p.ai!.signal} ${Math.round(p.ai!.probability_up)}%`).join(", ")}.` : ""}</span>
             <span className="block">4. The best {status.auto_list_size} make the list; a share already on it stays while
               it ranks in the top {Math.round(status.auto_list_size * 1.4)}.</span>

@@ -8,6 +8,9 @@ Daily discovery: picks the day's Auto list from the whole market instead of a fi
       -> AI review: the best AI_REVIEW_SHORTLIST candidates are analysed by every enabled model
          (multi-model) with claims checked against the data; a confident combined SELL vetoes a
          share for the day, and the combined probability moves its selection score (+/-10)
+      -> catalyst route: up to CATALYST_MAX shares below the shortlist that have a fresh positive
+         signal today (breakout, volume surge on an up day, high-delivery buying, positive AI-read
+         filings/results news) are reviewed too, if the AI's boost could still put them on the list
       -> the day's Auto list: the best AUTO_LIST_SIZE, with a little stickiness so shares on
          yesterday's list aren't swapped out for noise.
 
@@ -61,6 +64,12 @@ PRICE_MISMATCH_PCT = 2.0       # feed close vs NSE's official close on the same 
 FILING_READ_CANDIDATES = 40    # best candidates whose latest NSE filings the AI reads before the review
 FILINGS_PER_SHARE = 3
 MAX_FILING_READS = 60          # per run, so one busy filing day can't exhaust a paid model's daily cap      # a re-pick reuses an AI review younger than this; older ones are redone
+
+# Catalyst route: shares below the shortlist with a fresh signal today also get the AI review,
+# so a share moving on real news or real buying isn't missed because its trend score lags.
+CATALYST_SHARE = 0.3           # extra reviews = 30% of the shortlist ...
+CATALYST_MIN, CATALYST_MAX = 3, 10   # ... but at least 3 and at most 10 per run
+CATALYST_AI_SENTIMENT = 60.0   # AI-read news/filings score that counts as a positive catalyst
 
 ACTION_ORDER = {"BUY": 0, "WAIT": 1, "AVOID": 2}
 
@@ -137,6 +146,51 @@ def ai_points(probability_up: Optional[float]) -> float:
 def is_vetoed(review: Optional[dict]) -> bool:
     return bool(review and review.get("signal") == "SELL"
                 and (review.get("evidence_confidence") or 0) >= AI_VETO_CONFIDENCE)
+
+
+def catalyst_reasons(item) -> list[str]:
+    """Today's positive signals on a scored share (empty = nothing new happened to it today)."""
+    t, s = item.technical, item.sentiment or {}
+    reasons = []
+    if t.breakout:
+        reasons.append("broke above its 20-day high on heavy volume")
+    elif t.volume_spike and (t.change_pct or 0) > 0:
+        reasons.append(f"up {t.change_pct:.1f}% on {t.volume_ratio:.1f}x its average volume")
+    if (item.adjustments or {}).get("delivery", 0) > 0:
+        reasons.append("high-delivery buying")
+    if s.get("source") == "ai" and (s.get("score") or 0) >= CATALYST_AI_SENTIMENT:
+        reasons.append("AI read positive filings/news")
+    elif s.get("earnings_news") and (s.get("score") or 0) > 55:
+        reasons.append("positive results news")
+    return reasons
+
+
+def catalyst_count(shortlist: int) -> int:
+    return 0 if shortlist <= 0 else max(CATALYST_MIN, min(CATALYST_MAX, round(shortlist * CATALYST_SHARE)))
+
+
+def pick_catalysts(ordered: list, skip: set[str], size: int, limit: int) -> list[tuple]:
+    """
+    Up to `limit` (item, reasons) from best-first `ordered` (not in `skip`, not AVOID) that have a
+    catalyst today AND could still make the day's list: even the full AI boost can't lift a share
+    past the list's cut-off if it trails by more than 2 x AI_MAX_POINTS (the cut-off share may also
+    lose up to AI_MAX_POINTS), so reviewing those would cost model calls without changing the list.
+    Strongest first: most signals, then volume surge, then data score.
+    """
+    if limit <= 0:
+        return []
+    live = [i for i in ordered if i.action != "AVOID"]
+    cut = live[size - 1] if len(live) >= size else None
+
+    def reachable(item) -> bool:
+        if cut is None:
+            return True
+        a, c = ACTION_ORDER.get(item.action, 3), ACTION_ORDER.get(cut.action, 3)
+        return a < c or (a == c and item.conviction_score + 2 * AI_MAX_POINTS > cut.conviction_score)
+
+    found = [(i, r) for i in live if i.symbol not in skip and reachable(i) for r in [catalyst_reasons(i)] if r]
+    found.sort(key=lambda p: (-len(p[1]), -(p[0].technical.volume_ratio or 0), -p[0].conviction_score, p[0].symbol))
+    return found[:limit]
 
 
 def select(ordered: list[str], incumbents: set[str], size: int, keep_rank: int) -> list[str]:
@@ -285,13 +339,23 @@ class DiscoveryService:
         screen.top_sectors = ",".join(context.top_sectors) or None
 
         items.sort(key=lambda r: (ACTION_ORDER.get(r.action, 3), -r.conviction_score, r.symbol))
-        if ai_review and settings.AI_ANALYST_ENABLED:
-            items, screen.filings_read = await self._read_filings(db, items, eligible_pairs, context)
+        size = prefs["auto_list_size"]
+        review_size = prefs["ai_review_shortlist"]
+        extra = catalyst_count(review_size)
         reviews: dict[str, dict] = {}
+        catalysts: list[tuple] = []
         if ai_review and settings.AI_ANALYST_ENABLED:
-            shortlist = [i for i in items if i.action != "AVOID"][:prefs["ai_review_shortlist"]]
-            reviews = await self._ai_review(db, shortlist)
+            # Catalyst shares get their filings read too, so a news-driven move is judged on the news.
+            read_anyway = {i.symbol for i in [i for i in items if i.action != "AVOID"][:FILING_READ_CANDIDATES]}
+            early = [i for i, _ in pick_catalysts(items, read_anyway, size, extra)]
+            items, screen.filings_read = await self._read_filings(db, items, eligible_pairs, context, early)
+            shortlist = [i for i in items if i.action != "AVOID"][:review_size]
+            catalysts = pick_catalysts(items, {i.symbol for i in shortlist}, size, extra)
+            reviews = await self._ai_review(db, shortlist + [i for i, _ in catalysts])
         screen.ai_reviewed = len(reviews)
+        screen.catalysts_json = json.dumps([{"symbol": i.symbol, "reasons": r, "reviewed": i.symbol in reviews}
+                                            for i, r in catalysts])
+        catalyst_why = {i.symbol: r for i, r in catalysts}
         if ai_review and not reviews:
             screen.note = "No AI model answered, so today's list is chosen from the real-data screen alone."
 
@@ -302,7 +366,6 @@ class DiscoveryService:
         ordered = sorted((i for i in items if i.symbol not in vetoed),
                          key=lambda r: (ACTION_ORDER.get(r.action, 3), -selection_score(r), r.symbol))
         incumbents = {s.symbol for s in stocks if s.watchlist_status == "active"}
-        size = prefs["auto_list_size"]
         chosen = select([i.symbol for i in ordered], incumbents, size, int(size * KEEP_RANK_FACTOR))
         by_symbol = {i.symbol: i for i in items}
 
@@ -323,6 +386,8 @@ class DiscoveryService:
             if review:
                 entry["ai"] = {"signal": review.get("signal"), "probability_up": review.get("probability_up"),
                                "confidence": review.get("evidence_confidence"), "votes": review.get("vote_text")}
+            if symbol in catalyst_why:
+                entry["catalyst"] = catalyst_why[symbol]
             return entry
 
         screen.selected_count = len(chosen)
@@ -333,17 +398,22 @@ class DiscoveryService:
               "filtered by data checks" if s not in by_symbol else "ranked below today's best"} for s in removed])
         return self._finish(db, screen, started, universe, vetoed=sorted(vetoed))
 
-    async def _read_filings(self, db: Session, items: list, pairs: list, context) -> tuple[list, int]:
+    async def _read_filings(self, db: Session, items: list, pairs: list, context,
+                            catalysts: Optional[list] = None) -> tuple[list, int]:
         """
         The AI reads the latest material NSE filings of the best candidates (once each, ever), and
         those candidates are re-scored with its reads replacing the rule-based filing rating.
+        Catalyst shares are read first: for a share moving today, the filing is usually the story.
         """
         from ai_analyst_service import ai_analyst_service
         from nse_service import nse_service
         from ranking_service import ranking_service
 
         frames = {stock.symbol: (stock, frame) for stock, frame in pairs}
-        candidates = [i for i in items if i.action != "AVOID"][:FILING_READ_CANDIDATES]
+        catalysts = catalysts or []
+        seen = {i.symbol for i in catalysts}
+        candidates = catalysts + [i for i in items if i.action != "AVOID"
+                                  and i.symbol not in seen][:FILING_READ_CANDIDATES]
         to_read = [(frames[i.symbol][0], f) for i in candidates if i.symbol in frames
                    for f in nse_service.filings_for(i.symbol)[:FILINGS_PER_SHARE]][:MAX_FILING_READS]
         if not to_read:
@@ -436,6 +506,7 @@ class DiscoveryService:
                 "removed": json.loads(screen.removed_json or "[]"),
                 "top_sectors": screen.top_sectors.split(",") if screen.top_sectors else [],
                 "filings_read": screen.filings_read or 0,
+                "catalysts": json.loads(screen.catalysts_json or "[]"),
                 "note": screen.note, "seconds": float(screen.seconds) if screen.seconds is not None else None}
 
     def status(self, db: Session) -> dict:
