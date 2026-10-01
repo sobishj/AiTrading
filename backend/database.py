@@ -128,6 +128,19 @@ _COLUMN_MIGRATIONS = [
     "CREATE INDEX IF NOT EXISTS ix_ai_predictions_consensus_id ON ai_predictions (consensus_id)",
     "ALTER TABLE ai_market_outlooks ADD COLUMN IF NOT EXISTS role VARCHAR(10) NOT NULL DEFAULT 'primary'",
     "ALTER TABLE app_settings ADD COLUMN IF NOT EXISTS analysis_mode VARCHAR(10) NOT NULL DEFAULT 'single'",
+    "ALTER TABLE ai_lessons ADD COLUMN IF NOT EXISTS source_models TEXT",
+    "ALTER TABLE stocks ADD COLUMN IF NOT EXISTS universe_seen_at TIMESTAMP",
+    "ALTER TABLE user_chats ADD COLUMN IF NOT EXISTS answered_by VARCHAR(300)",
+    "ALTER TABLE universe_screens ADD COLUMN IF NOT EXISTS filings_read INTEGER DEFAULT 0",
+    "ALTER TABLE nse_daily ADD COLUMN IF NOT EXISTS open DECIMAL",
+    "ALTER TABLE nse_daily ADD COLUMN IF NOT EXISTS high DECIMAL",
+    "ALTER TABLE nse_daily ADD COLUMN IF NOT EXISTS low DECIMAL",
+    "ALTER TABLE app_settings ADD COLUMN IF NOT EXISTS discovery_enabled BOOLEAN",
+    "ALTER TABLE app_settings ADD COLUMN IF NOT EXISTS universe_screen_time VARCHAR(5)",
+    "ALTER TABLE app_settings ADD COLUMN IF NOT EXISTS auto_list_size INTEGER",
+    "ALTER TABLE app_settings ADD COLUMN IF NOT EXISTS ai_review_shortlist INTEGER",
+    "ALTER TABLE app_settings ADD COLUMN IF NOT EXISTS min_traded_value_cr DECIMAL",
+    "CREATE INDEX IF NOT EXISTS ix_ai_predictions_model ON ai_predictions (model)",
 ]
 
 

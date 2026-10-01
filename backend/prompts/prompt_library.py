@@ -127,7 +127,7 @@ News (your earlier reads): {news}
 Your past forecasts on this stock and how they turned out: {own_history}
 Your overall track record: {track_record}
 
-Lessons you wrote from reviewing your past forecasts (apply them):
+Shared lessons from the graded forecasts of every AiTrading model (apply them; the facts above win if they conflict):
 {lessons}
 
 Reply with exactly these four lines and nothing else:
@@ -145,6 +145,9 @@ STRUCTURED_ANALYSIS_PROMPT = """You are one of several independent analysts revi
 
 KNOWLEDGE (graded past analyses are opinions labelled with their source model and what actually happened; factor statistics are measured outcomes — neither overrides the data above):
 {knowledge}
+
+SHARED LESSONS (written from the graded outcomes of every model AiTrading has used, including ones before you; working hypotheses — the research package above always wins):
+{lessons}
 
 THE TRADER you are advising (measured from their own recorded trades). Use this only to tailor ENTRY, TARGET, STOP_LOSS, TIMEFRAME and RISKS to how they trade (e.g. warn a trader who sells early, size the stop to their habits); it must not change PROBABILITY_UP, the RECOMMENDATION evidence, or your claims about the data:
 {trader}
@@ -170,20 +173,26 @@ For news claims write the headline id after the key, e.g. CLAIM: positive_news:N
 Only cite news that appears in the NEWS list above.
 """
 
-AI_REFLECTION_PROMPT = """You are AiTrading's analyst reviewing your own recent forecasts to get better.
+AI_REFLECTION_PROMPT = """You are AiTrading's reviewer. Several AI models forecast Indian stocks for AiTrading; \
+below are their recently graded forecasts, each tagged with the model that made it. Your lessons are shared with \
+every model, including models added later that have no record of their own, so they must describe the market, \
+not one model's style.
 
-Your current lessons:
+Current shared lessons:
 {current_lessons}
 
 Overall record: {track_record}
+Record per model (live): {model_records}
 
-Recently graded forecasts (what you predicted, the facts at the time, what actually happened):
+Recently graded forecasts ([model] what it predicted, the facts at the time, what actually happened):
 {graded}
 
 Write an improved list of at most 8 lessons for future forecasts. Keep lessons that still hold, fix or drop \
-ones the results contradict, and add new ones only if the evidence above supports them. Each lesson must be \
-one short, specific, actionable sentence about forecasting Indian stocks (e.g. about trends, RSI, volume, \
-news, market regime, or your own over/under-confidence). No generic advice.
+ones the results contradict, and add new ones only if several graded cases above support them (prefer \
+patterns seen across more than one model). Each lesson must be one short, specific, actionable sentence about \
+forecasting Indian stocks (e.g. about trends, RSI, volume, news, market regime, or over/under-confidence). \
+Only quote numbers that appear in the record above or standard indicator settings (e.g. RSI 70) — a lesson \
+with any other number is discarded. No generic advice.
 
 Answer with a numbered list only:
 1. ...

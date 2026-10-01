@@ -283,9 +283,12 @@ async def add_stock(payload: AddStockRequest, background: BackgroundTasks, db: S
 
 @router.delete("/stocks/{symbol}", status_code=204)
 async def remove_stock(symbol: str, background: BackgroundTasks, db: Session = Depends(get_db)):
-    """Remove a stock from the Auto universe (history and recommendations are kept)."""
+    """
+    Remove a stock from the Auto list (history and recommendations are kept). It is marked
+    "excluded" so the daily discovery run doesn't pick it again; adding it back clears that.
+    """
     stock = _get_stock_or_404(db, symbol)
-    stock.watchlist_status = "inactive"
+    stock.watchlist_status = "excluded"
     db.commit()
 
     async def rerank() -> None:
@@ -294,6 +297,28 @@ async def remove_stock(symbol: str, background: BackgroundTasks, db: Session = D
             await refresh_and_broadcast(bg_db, trigger=f"{stock.symbol} removed from watchlist")
 
     background.add_task(rerank)
+
+
+@router.get("/universe/status")
+async def universe_status(db: Session = Depends(get_db)):
+    """The latest daily discovery run: pool, data-check filters, AI review and why each share was picked."""
+    from discovery_service import discovery_service
+    return discovery_service.status(db)
+
+
+@router.post("/universe/run", status_code=202)
+async def universe_run(background: BackgroundTasks):
+    """Re-select the Auto list now (real-data screen of the whole pool, then AI review of the best)."""
+    from discovery_service import discovery_service
+    if discovery_service.running:
+        return {"status": "already running"}
+
+    async def job() -> None:
+        from main import run_discovery
+        await run_discovery(trigger="manual")
+
+    background.add_task(job)
+    return {"status": "started"}
 
 
 @router.get("/stocks/{symbol}/candles")
@@ -489,25 +514,29 @@ async def chat(request: ChatMessageRequest, db: Session = Depends(get_db)):
         if item is not None and item is not selected:
             context_lines.append(f"{item.name} ({symbol}) detail: {ranking_service.build_reasoning(item)}")
 
+    profile = llm_service.active("chat")
     ai_response = await llm_service.chat(
         message, stock_context=request.stock_context, context_snippets=context_lines,
         history=insight_service.chat_history(db),
         focus=(selected.name, selected.symbol) if selected is not None else None,
     )
+    answered_by = f"{profile.name} · {profile.model}" if profile else None
 
-    chat_row = UserChat(user_message=message, ai_response=ai_response,
+    chat_row = UserChat(user_message=message, ai_response=ai_response, answered_by=answered_by,
                         stock_context=request.stock_context, timestamp=datetime.utcnow())
     db.add(chat_row)
     db.commit()
     return ChatMessageResponse(id=chat_row.id, user_message=message, ai_response=ai_response,
-                               stock_context=request.stock_context, timestamp=chat_row.timestamp)
+                               stock_context=request.stock_context, timestamp=chat_row.timestamp,
+                               answered_by=answered_by)
 
 
 @router.get("/chat/history", response_model=list[ChatMessageResponse])
 async def get_chat_history(limit: int = 50, db: Session = Depends(get_db)):
     rows = db.query(UserChat).order_by(UserChat.timestamp.desc()).limit(min(limit, 200)).all()
     return [ChatMessageResponse(id=r.id, user_message=r.user_message, ai_response=r.ai_response,
-                                stock_context=r.stock_context, timestamp=r.timestamp) for r in reversed(rows)]
+                                stock_context=r.stock_context, timestamp=r.timestamp, answered_by=r.answered_by)
+            for r in reversed(rows)]
 
 
 @router.delete("/chat/history", status_code=204)
@@ -681,11 +710,12 @@ async def ai_outlook_now():
 
 @router.get("/ai/lessons")
 async def get_ai_lessons(db: Session = Depends(get_db)):
-    """Every version of the lessons Qwen has written, newest first."""
+    """Every version of the shared lessons, newest first, with who wrote them and whose forecasts they came from."""
     from models import AILesson
     rows = db.query(AILesson).order_by(AILesson.version.desc()).limit(50).all()
     return [{"version": r.version, "lessons": r.lessons_text.split("\n"), "created_at": r.created_at.isoformat(),
-             "based_on_predictions": r.based_on_predictions,
+             "based_on_predictions": r.based_on_predictions, "written_by": r.model,
+             "source_models": r.source_models.split(",") if r.source_models else [],
              "hit_rate_at_creation": float(r.hit_rate_at_creation) if r.hit_rate_at_creation is not None else None}
             for r in rows]
 

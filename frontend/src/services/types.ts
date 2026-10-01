@@ -335,6 +335,8 @@ export interface ChatMessage {
   timestamp: string;
   stockContext?: string | null;
   tradeProposal?: TradeProposal | null;
+  /** Assistant messages: the model that wrote the reply. */
+  answeredBy?: string | null;
 }
 
 export interface ChatResponse {
@@ -344,6 +346,7 @@ export interface ChatResponse {
   stock_context: string | null;
   timestamp: string;
   trade_proposal?: TradeProposal | null;
+  answered_by?: string | null;
 }
 
 export interface IndexQuote {
@@ -392,6 +395,8 @@ export interface ModelRef {
   name: string;
   kind: string;
   model: string;
+  /** Runs on this PC (Bionic, LM Studio, Ollama…). */
+  local?: boolean;
 }
 
 export interface AppStatus {
@@ -626,6 +631,25 @@ export interface ModelCredit {
   error?: string;
 }
 
+export interface SpendPeriod {
+  requests: number;
+  input_tokens: number;
+  output_tokens: number;
+  /** null when the model has no known price (tokens are still counted). */
+  usd: number | null;
+  inr: number | null;
+}
+
+/** What AiTrading itself spent per model (GET /llm/spend); not the provider's account-wide figure. */
+export interface ModelSpend {
+  profile_id: number;
+  is_local: boolean;
+  fx: { rate: number; as_of: string } | null;
+  price: { input: number; output: number; source: string } | null;
+  today: SpendPeriod;
+  month: SpendPeriod;
+}
+
 export interface LLMPreset {
   key: string;
   name: string;
@@ -809,6 +833,104 @@ export interface ModelUsage {
   estimated_cost_usd: number | null;
   daily_limit: number;
   hourly_limit: number;
+}
+
+/** Per-model cost basis for the daily-cap estimate (GET /llm/cost-stats). */
+export interface ModelCostStats {
+  profile_id: number;
+  is_local: boolean;
+  fx: { rate: number; as_of: string } | null;
+  price: { input: number; output: number; source: string } | null;
+  tokens_per_call: { input: number; output: number; measured_from_calls: number };
+  usd_per_call: number | null;
+  recent_usd_per_day: number | null;
+  recent_calls_per_day: number;
+}
+
+export interface DataSourceRow {
+  id: number;
+  kind: string;
+  name: string;
+  url: string | null;
+  enabled: boolean;
+  builtin: boolean;
+  notes: string | null;
+  last_ok_at: string | null;
+  last_error: string | null;
+  last_items: number | null;
+}
+
+export interface FeedTest {
+  ok: boolean;
+  error?: string;
+  title?: string;
+  count?: number;
+  items?: { title: string; published?: string | null }[];
+}
+
+export interface GeneralSettings {
+  discovery_enabled: boolean;
+  universe_screen_time: string;
+  auto_list_size: number;
+  ai_review_shortlist: number;
+  min_traded_value_cr: number;
+  defaults: Omit<GeneralSettings, "defaults">;
+}
+
+export interface BackupEntry {
+  name: string;
+  size_bytes: number;
+  created_at: string | null;
+  rows: number;
+  kind: "auto" | "manual";
+}
+
+export interface BackupReport {
+  ok: boolean;
+  problems: string[];
+  name: string;
+  exported_at: string | null;
+  rows: number;
+  highlights: Record<string, number>;
+  excluded: string[];
+}
+
+/** One selected share in a daily discovery run (GET /universe/status). */
+export interface DiscoveryPick {
+  symbol: string;
+  name: string;
+  sector: string | null;
+  action: string;
+  data_score: number;
+  selection_score: number;
+  strategy: string | null;
+  ai?: { signal: string; probability_up: number; confidence: number; votes: string | null };
+}
+
+/** The latest daily discovery run: how the Auto list was chosen from the whole market. */
+export interface DiscoveryStatus {
+  available: boolean;
+  running: boolean;
+  run_at?: string;
+  trigger?: string;
+  pool_size?: number;
+  eligible?: number;
+  ai_reviewed?: number;
+  selected_count?: number;
+  filtered?: Record<string, number>;
+  selected?: DiscoveryPick[];
+  added?: string[];
+  removed?: { symbol: string; reason: string }[];
+  top_sectors?: string[];
+  /** NSE filings the AI read for the best candidates in this run. */
+  filings_read?: number;
+  /** Official NSE sources: last successful fetch (or the error) for filings, calendar, ban, deals, bhavcopy. */
+  sources?: Record<string, { ok: boolean; at?: string; error?: string; [k: string]: unknown }>;
+  note?: string | null;
+  seconds?: number | null;
+  auto_list_size: number;
+  ai_review_shortlist: number;
+  pool_now: number;
 }
 
 export interface ModelPresets {

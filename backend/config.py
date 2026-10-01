@@ -85,6 +85,13 @@ class Settings(BaseSettings):
     # Seed the stocks table with the built-in NSE large-cap universe
     # (universe.py) when it is empty on startup.
     SEED_WATCHLIST: bool = True
+    # Daily discovery (discovery_service): the Auto list is re-selected every weekday from the
+    # whole NIFTY 500 — real-data screen, then AI review of the best candidates.
+    UNIVERSE_DISCOVERY_ENABLED: bool = True
+    UNIVERSE_SCREEN_TIME: str = "08:20"          # IST; before the brief (08:30) and AI forecasts (08:45)
+    AUTO_LIST_SIZE: int = 50                      # shares in the day's Auto list
+    AI_REVIEW_SHORTLIST: int = 20                 # best screened shares every enabled model analyses
+    MIN_TRADED_VALUE_CR: float = 10.0             # liquidity floor: median daily traded value, Rs crore
 
     # ---- Scheduled jobs (IST, HH:MM) ----
     MORNING_BRIEF_TIME: str = "08:30"

@@ -29,6 +29,9 @@ ADJUSTMENT_LABELS = {
     "earnings_momentum": "Earnings momentum bonus",
     "ai_view": "AI analyst (Qwen) view, weighted by its track record",
     "timing": "Entry timing (dip in a long-term uptrend vs. short-term overextension)",
+    "results_risk": "Results due within a week (NSE calendar) — gap risk",
+    "fo_ban": "In NSE's F&O ban list (crowded positioning)",
+    "delivery": "Move backed by unusually high delivery (NSE bhavcopy)",
 }
 
 

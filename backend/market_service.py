@@ -212,17 +212,27 @@ class MarketService:
 
     async def get_candles_for_symbol(self, symbol: str, days: int = 60,
                                      interval: str = "day") -> pd.DataFrame:
-        """Candles from Kite when connected, else Yahoo; Kite failures fall back to Yahoo."""
+        """
+        Candles from Kite when connected, else Yahoo; Kite failures fall back to Yahoo. Daily bars get
+        any recent session the feed skipped filled in from NSE's official end-of-day file.
+        """
+        candles = None
         if self.data_source == "kite":
             token = self._resolve_instrument_token(symbol)
             if token is not None:
                 try:
                     candles = await self.get_candles(token, days=days, interval=interval)
-                    if not candles.empty:
-                        return candles
+                    if candles.empty:
+                        candles = None
                 except Exception as exc:  # noqa: BLE001
                     logger.warning("Kite candles failed for %s, falling back to Yahoo: %s", symbol, exc)
-        return await yahoo_provider.get_candles(symbol, days=days, interval=interval)
+                    candles = None
+        if candles is None:
+            candles = await yahoo_provider.get_candles(symbol, days=days, interval=interval)
+        if interval == "day" and not symbol.startswith("^") and "=" not in symbol:
+            from nse_service import nse_service  # local import: nse_service imports this module lazily
+            candles = nse_service.fill_missing_sessions(symbol, candles)
+        return candles
 
     async def validate_symbol_exists(self, symbol: str) -> Optional[dict]:
         """Confirm an NSE symbol has market data; returns Yahoo meta (incl. longName) or None."""
@@ -233,25 +243,29 @@ class MarketService:
     # News / sentiment
     # ------------------------------------------------------------------
     async def fetch_news_async(self, force_refresh: bool = False) -> list[dict]:
-        """Fetch all configured RSS feeds concurrently (3-minute cache), newest first."""
+        """Fetch every enabled news feed (Settings -> Data sources) concurrently (3-minute cache), newest first."""
+        from sources_service import sources_service  # local import: sources_service is a leaf module
+
         if not force_refresh and self._news_cache and time.monotonic() - self._news_cache_at < NEWS_CACHE_SECONDS:
             return self._news_cache
 
+        feeds = sources_service.enabled_feeds()
         async with httpx.AsyncClient(headers=_BROWSER_HEADERS, timeout=15, follow_redirects=True) as client:
-            responses = await asyncio.gather(
-                *(client.get(url) for url in settings.news_feed_list), return_exceptions=True
-            )
+            responses = await asyncio.gather(*(client.get(url) for url, _ in feeds), return_exceptions=True)
 
         cutoff = datetime.now(IST) - timedelta(hours=NEWS_MAX_AGE_HOURS)
         seen: set[str] = set()
         items: list[dict] = []
-        for url, response in zip(settings.news_feed_list, responses):
+        for (url, name), response in zip(feeds, responses):
             if isinstance(response, Exception) or response.status_code != 200:
-                logger.warning("News feed failed: %s (%s)", url,
-                               response if isinstance(response, Exception) else response.status_code)
+                reason = (f"{response.__class__.__name__}" if isinstance(response, Exception)
+                          else f"HTTP {response.status_code}")
+                logger.warning("News feed failed: %s (%s)", url, reason)
+                sources_service.record("rss", False, error=reason, url=url)
                 continue
             feed = feedparser.parse(response.content)
-            source = feed.feed.get("title", url) if feed.feed else url
+            source = name or (feed.feed.get("title", url) if feed.feed else url)
+            before = len(items)
             for entry in feed.entries:
                 title = re.sub(r"\s+", " ", entry.get("title", "")).strip()
                 published = _parse_published(entry)
@@ -270,12 +284,13 @@ class MarketService:
                     "sentiment": headline_sentiment(title + " " + summary),
                     "market_moving": is_market_moving(title),
                 })
+            sources_service.record("rss", True, items=len(items) - before, url=url)
 
         items.sort(key=lambda i: i["published"], reverse=True)
         if items or not self._news_cache:
             self._news_cache = items
             self._news_cache_at = time.monotonic()
-            logger.info("Fetched %d fresh news items from %d feeds", len(items), len(settings.news_feed_list))
+            logger.info("Fetched %d fresh news items from %d feeds", len(items), len(feeds))
         return self._news_cache
 
     def fetch_news(self) -> list[dict]:
@@ -296,6 +311,11 @@ class MarketService:
         pattern = keyword_pattern(terms)
         news = self._news_cache
         relevant = [item for item in news if pattern and pattern.search(item["title"] + " " + item["summary"])]
+        # The company's own NSE filings, tied by symbol (results, orders, management, regulatory action).
+        from nse_service import nse_service  # local import: nse_service imports this module lazily
+        titles = {item["title"] for item in relevant}
+        relevant += [f for f in nse_service.filings_for(symbol) if f["title"] not in titles]
+        relevant.sort(key=lambda item: item.get("published") or "", reverse=True)
         if not relevant:
             return {"sentiment": "neutral", "score": 50.0, "matched_headlines": [], "news_count": 0,
                     "earnings_news": False, "headlines": []}

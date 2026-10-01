@@ -27,6 +27,7 @@ import pandas as pd
 from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
+from data_provider import completed_daily_bars
 from evidence_engine import CLAIM_RULES, present_factors
 from models import AIConsensus, AIPrediction, PatternStat, ResearchContext, Stock, tracked_stock_filter
 from utils.logger import get_logger
@@ -152,7 +153,8 @@ class KnowledgeService:
         counters: dict = defaultdict(_Counter)
         observations = 0
         for stock in stocks:
-            candles = await market_service.get_candles_for_symbol(stock.symbol, days=HISTORY_DAYS)
+            # Only finished sessions: a still-forming bar would count a live price as a 5-day outcome.
+            candles = completed_daily_bars(await market_service.get_candles_for_symbol(stock.symbol, days=HISTORY_DAYS))
             if candles.empty or len(candles) < HISTORY_WARMUP + HORIZON + 10 or "date" not in candles.columns:
                 continue
             df = analysis_service.indicator_frame(candles)
@@ -252,8 +254,17 @@ class KnowledgeService:
             q = q.filter(AIPrediction.model == model)
         return q.all()
 
-    def model_reliability(self, db: Session, profile_id: int, regime: Optional[str], setup: Optional[str]) -> dict:
-        rows = [p for p, _ in self._member_rows(db, profile_id=profile_id)]
+    def model_reliability(self, db: Session, model: Optional[str], regime: Optional[str], setup: Optional[str]) -> dict:
+        """
+        Graded live record of one model, keyed by the model itself rather than its saved profile: a model
+        re-added under a new profile keeps its record, and a profile switched to another model doesn't pass
+        the old model's record on. Counts both its multi-model answers and its single-model forecasts.
+        """
+        if not model:
+            return {"n": 0, "hits": 0}
+        rows = (db.query(AIPrediction)
+                .filter(AIPrediction.graded_at.isnot(None), AIPrediction.kind == "live", AIPrediction.model == model,
+                        AIPrediction.role.in_(("member", "primary"))).all())
         stats = {"n": len(rows), "hits": sum(1 for p in rows if p.correct)}
         candidates = [
             (lambda p: primary_regime(p.market_regime) == regime and p.strategy == setup,

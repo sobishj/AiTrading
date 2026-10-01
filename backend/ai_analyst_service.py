@@ -43,7 +43,8 @@ import pandas as pd
 from sqlalchemy.orm import Session
 
 from config import settings
-from llm_service import llm_service
+from data_provider import completed_daily_bars, reference_price
+from llm_service import llm_service, ungrounded_numbers
 from market_service import market_service
 from models import AILesson, AIMarketOutlook, AINewsInsight, AIPrediction, AppSettings, Stock
 from prompts.prompt_library import PromptLibrary
@@ -73,6 +74,10 @@ NEWS_LOOKBACK_HOURS = 72
 MIN_NEW_GRADES_FOR_REFLECTION = 3        # new live grades that trigger a review
 PRACTICE_GRADES_PER_REFLECTION = 20      # ...or this many new practice grades
 MAX_LESSONS = 8
+REFLECTION_LIVE_CASES = 12               # latest graded live forecasts reviewed (all models)
+REFLECTION_PRACTICE_CASES = 12
+# Conventional indicator settings a lesson may quote without them appearing in the graded record.
+STANDARD_THRESHOLDS = "RSI 20 30 40 50 60 70 80; EMA 20 50 200; MACD 12 26 9; 52-week; volume 1.5x 2x; ATR 14"
 
 # Practice on historical charts
 PRACTICE_HISTORY_DAYS = 1100             # ~3 years of daily bars to sample from
@@ -178,6 +183,18 @@ def parse_lessons(text: str) -> list[str]:
     return lessons[:MAX_LESSONS]
 
 
+def grounded_lessons(lessons: list[str], source: str) -> tuple[list[str], list[str]]:
+    """
+    (kept, dropped): a lesson quoting a number that isn't in the graded record
+    it was written from (an invented hit rate, price or threshold) is dropped,
+    because every model reads these lessons as if they were measured.
+    """
+    kept, dropped = [], []
+    for lesson in lessons:
+        (dropped if ungrounded_numbers(lesson, source) else kept).append(lesson)
+    return kept, dropped
+
+
 def trade_outcome(entry: float, bars: pd.DataFrame, target: Optional[float], stop: Optional[float],
                   recommendation: Optional[str]) -> dict:
     """
@@ -211,12 +228,13 @@ def trade_outcome(entry: float, bars: pd.DataFrame, target: Optional[float], sto
     return out
 
 
-def apply_outcome(prediction, bars: pd.DataFrame) -> None:
+def apply_outcome(prediction, bars: pd.DataFrame, entry: Optional[float] = None, scale: float = 1.0) -> None:
+    """`entry`/`scale` put the stored prices on the bars' scale after a corporate action (see reference_price)."""
     if bars.empty or not prediction.price_at_prediction:
         return
-    o = trade_outcome(float(prediction.price_at_prediction), bars,
-                      float(prediction.target) if prediction.target is not None else None,
-                      float(prediction.stop_loss) if prediction.stop_loss is not None else None,
+    o = trade_outcome(entry if entry is not None else float(prediction.price_at_prediction), bars,
+                      float(prediction.target) * scale if prediction.target is not None else None,
+                      float(prediction.stop_loss) * scale if prediction.stop_loss is not None else None,
                       prediction.recommendation)
     prediction.max_favorable_pct, prediction.max_adverse_pct = o["max_favorable_pct"], o["max_adverse_pct"]
     prediction.target_hit, prediction.stop_hit, prediction.outcome_pnl_pct = o["target_hit"], o["stop_hit"], o["pnl_pct"]
@@ -302,6 +320,12 @@ class AIAnalystService:
                 continue
             for item in recent:
                 if pattern.search(item["title"] + " " + item.get("summary", "")):
+                    pairs.append((stock, item))
+        # NSE filings belong to exactly one share: matched by symbol, not by keywords.
+        from nse_service import nse_service
+        for stock in stocks:
+            for item in nse_service.filings_for(stock.symbol):
+                if not item.get("published") or datetime.fromisoformat(item["published"]) >= cutoff:
                     pairs.append((stock, item))
         return pairs
 
@@ -431,12 +455,12 @@ class AIAnalystService:
             call=call, news=news,
             own_history=self.own_history_text(db, item.stock_id),
             track_record=self.track_record_text(db),
-            lessons=self._lessons_block(lessons),
+            lessons=self.lessons_block(lessons),
         )
 
     @staticmethod
-    def _lessons_block(lessons: list[str]) -> str:
-        return "\n".join(f"{i}. {l}" for i, l in enumerate(lessons, 1)) or "None yet — this is your first review cycle."
+    def lessons_block(lessons: list[str]) -> str:
+        return "\n".join(f"{i}. {l}" for i, l in enumerate(lessons, 1)) or "None yet — no graded forecasts reviewed so far."
 
     def own_history_text(self, db: Session, stock_id: int, limit: int = 5) -> str:
         rows = (db.query(AIPrediction)
@@ -472,7 +496,7 @@ class AIAnalystService:
             if stock is None:
                 continue
             days = (today_ist() - prediction.prediction_date).days + 10
-            candles = await market_service.get_candles_for_symbol(stock.symbol, days=days)
+            candles = completed_daily_bars(await market_service.get_candles_for_symbol(stock.symbol, days=days))
             if candles.empty or "date" not in candles.columns:
                 continue
             dates = pd.to_datetime(candles["date"])
@@ -481,12 +505,13 @@ class AIAnalystService:
             after = candles[dates.dt.date > prediction.prediction_date].reset_index(drop=True)
             if len(after) < prediction.horizon_days:
                 continue
+            entry, scale = reference_price(candles, prediction.prediction_date, float(prediction.price_at_prediction))
             close = float(after.iloc[prediction.horizon_days - 1]["close"])
-            ret = (close / float(prediction.price_at_prediction) - 1) * 100
+            ret = (close / entry - 1) * 100
             prediction.actual_return_pct = round(ret, 2)
             prediction.actual_direction = classify_return(ret)
             prediction.correct = is_correct(prediction.direction, ret)
-            apply_outcome(prediction, after.iloc[: prediction.horizon_days])
+            apply_outcome(prediction, after.iloc[: prediction.horizon_days], entry=entry, scale=scale)
             prediction.graded_at = datetime.utcnow()
             graded += 1
         db.commit()
@@ -504,13 +529,26 @@ class AIAnalystService:
     # 4. Reflection -> lessons
     # ------------------------------------------------------------------
     @staticmethod
-    def _own_rows_filter(db: Session):
-        """The background model's own forecasts: single-model primary rows plus its member rows in multi-model runs."""
-        from sqlalchemy import and_, or_
-        cfg = db.get(AppSettings, 1)
-        bg = cfg.background_profile_id if cfg else None
-        return or_(and_(AIPrediction.role == "primary", AIPrediction.model != "consensus"),
-                   and_(AIPrediction.role == "member", AIPrediction.profile_id == bg))
+    def _shared_rows_filter():
+        """
+        Every model's own forecasts (single-model, practice, and each member of a
+        multi-model run), so the lessons pool what all models learned. The
+        combined consensus rows are left out: they restate the members.
+        """
+        from sqlalchemy import or_
+        return or_(AIPrediction.role == "member",
+                   (AIPrediction.role == "primary") & (AIPrediction.model != "consensus"))
+
+    def model_records_text(self, db: Session) -> str:
+        """Graded live record per source model, e.g. for the reviewer to weigh whose mistakes to learn from."""
+        rows = (db.query(AIPrediction.model, AIPrediction.correct)
+                .filter(AIPrediction.graded_at.isnot(None), AIPrediction.kind == "live",
+                        self._shared_rows_filter()).all())
+        by_model: dict[str, list[bool]] = defaultdict(list)
+        for model, correct in rows:
+            by_model[model or "unknown"].append(bool(correct))
+        return "; ".join(f"{m}: {sum(v)}/{len(v)} correct" for m, v in
+                         sorted(by_model.items(), key=lambda x: -len(x[1]))) or "no live forecasts graded yet"
 
     def current_lessons(self, db: Session) -> tuple[int, list[str]]:
         latest = db.query(AILesson).order_by(AILesson.version.desc()).first()
@@ -519,9 +557,14 @@ class AIAnalystService:
         return latest.version, [l for l in latest.lessons_text.split("\n") if l.strip()]
 
     async def reflect(self, db: Session, force: bool = False) -> Optional[AILesson]:
+        """
+        Review graded forecasts from every model and rewrite the shared lessons,
+        which then go into every model's prompts — so a newly added model starts
+        from what the others already learned instead of from nothing.
+        """
         latest = db.query(AILesson).order_by(AILesson.version.desc()).first()
         since = latest.created_at if latest else datetime.min
-        own = self._own_rows_filter(db)
+        own = self._shared_rows_filter()
 
         def new_since(kind: str) -> int:
             return (db.query(AIPrediction)
@@ -537,39 +580,56 @@ class AIAnalystService:
                     .filter(AIPrediction.graded_at.isnot(None), AIPrediction.kind == kind, own)
                     .order_by(AIPrediction.graded_at.desc()).limit(limit).all())
 
-        recent = latest_graded("live", 8) + latest_graded("practice", 12)
+        recent = latest_graded("live", REFLECTION_LIVE_CASES) + latest_graded("practice", REFLECTION_PRACTICE_CASES)
         if not recent:
             return None
 
         def describe(p: AIPrediction, stock: Stock) -> str:
             when = "practice, date hidden" if p.kind == "practice" else f"{p.prediction_date:%d %b}"
-            return (f"- {stock.name} ({when}): predicted {p.direction} ({float(p.probability_up):.0f}% up, "
-                    f"{p.strategy or 'no setup'}); reason: {p.reason or 'n/a'} → actual "
-                    f"{float(p.actual_return_pct):+.1f}% ({'RIGHT' if p.correct else 'WRONG'})")
+            return (f"- [{p.model or 'unknown model'}] {stock.name} ({when}): predicted {p.direction} "
+                    f"({float(p.probability_up):.0f}% up, {p.strategy or 'no setup'}"
+                    f"{', regime ' + p.market_regime if p.market_regime else ''}); reason: {p.reason or 'n/a'} → "
+                    f"actual {float(p.actual_return_pct):+.1f}% ({'RIGHT' if p.correct else 'WRONG'})")
 
         graded_text = "\n".join(describe(p, stock) for p, stock in recent)
+        track_record = self.track_record_text(db) + "; practice: " + self.track_record_text(db, kind="practice")
+        model_records = self.model_records_text(db)
         version, lessons = self.current_lessons(db)
         text = await llm_service.complete(PromptLibrary.ai_reflection(
             current_lessons="\n".join(f"{i}. {l}" for i, l in enumerate(lessons, 1)) or "none yet",
-            track_record=self.track_record_text(db) + "; practice: " + self.track_record_text(db, kind="practice"),
-            graded=graded_text,
+            track_record=track_record, model_records=model_records, graded=graded_text,
         ), temperature=0.3, max_tokens=500)
-        new_lessons = parse_lessons(text or "")
+        parsed = parse_lessons(text or "")
+        new_lessons, dropped = grounded_lessons(
+            parsed, "\n".join((graded_text, track_record, model_records, STANDARD_THRESHOLDS)))
+        if dropped:
+            logger.warning("Dropped %d lesson(s) quoting numbers not in the graded record: %s", len(dropped), dropped)
         if len(new_lessons) < 2:
             logger.warning("AI reflection produced no usable lessons: %r", (text or "")[:200])
             return None
 
-        perf = self.performance(db)
-        practice = self.performance(db, kind="practice")
+        source_models = sorted({p.model for p, _ in recent if p.model})
         lesson = AILesson(version=version + 1, lessons_text="\n".join(new_lessons),
-                          based_on_predictions=perf["graded"] + practice["graded"],
-                          hit_rate_at_creation=perf["hit_rate"] if perf["hit_rate"] is not None else practice["hit_rate"],
-                          model=background_model_name())
+                          based_on_predictions=(db.query(AIPrediction)
+                                                .filter(AIPrediction.graded_at.isnot(None), own).count()),
+                          hit_rate_at_creation=self._shared_hit_rate(db),
+                          model=background_model_name(), source_models=",".join(source_models) or None)
         db.add(lesson)
         db.commit()
         db.refresh(lesson)
-        logger.info("AI analyst wrote lessons v%d from %d graded forecasts", lesson.version, perf["graded"])
+        logger.info("Shared lessons v%d written from graded forecasts of %s", lesson.version,
+                    ", ".join(source_models) or "no model")
         return lesson
+
+    def _shared_hit_rate(self, db: Session) -> Optional[float]:
+        """Live hit rate across every model's forecasts (practice if nothing live is graded yet)."""
+        for kind in ("live", "practice"):
+            rows = [c for (c,) in db.query(AIPrediction.correct)
+                    .filter(AIPrediction.graded_at.isnot(None), AIPrediction.kind == kind,
+                            self._shared_rows_filter())]
+            if rows:
+                return round(sum(1 for c in rows if c) / len(rows) * 100, 1)
+        return None
 
     # ------------------------------------------------------------------
     # 5. Track record and earned trust
@@ -732,7 +792,7 @@ class AIAnalystService:
             news="not available for this historical case — judge from the chart alone",
             own_history="n/a (practice case)",
             track_record=self.track_record_text(db, kind="practice"),
-            lessons=self._lessons_block(lessons),
+            lessons=self.lessons_block(lessons),
         )
         text = await llm_service.complete(prompt, temperature=0.2, max_tokens=220)
         if text is None:
@@ -796,7 +856,7 @@ class AIAnalystService:
                    if flows.get("fii_activity") is not None else "unavailable"),
             headlines="\n".join(f"- {h['title']}" for h in headlines) or "none",
             track_record=self.outlook_track_record_text(db),
-            lessons=self._lessons_block(lessons),
+            lessons=self.lessons_block(lessons),
             sectors=", ".join(sectors),
         )
         text = await llm_service.complete(prompt, temperature=0.2, max_tokens=400)
@@ -850,7 +910,7 @@ class AIAnalystService:
                    .filter(AIMarketOutlook.graded_at.is_(None), AIMarketOutlook.session_date <= today_ist()).all())
         if not pending:
             return 0
-        nifty = await market_service.get_candles_for_symbol("^NSEI", days=60)
+        nifty = completed_daily_bars(await market_service.get_candles_for_symbol("^NSEI", days=60))
         if nifty.empty:
             return 0
         dates = pd.to_datetime(nifty["date"])

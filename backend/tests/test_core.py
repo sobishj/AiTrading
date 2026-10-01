@@ -336,3 +336,28 @@ def test_providers_without_balance_api_return_none():
     for config in (ProviderConfig(kind="anthropic", model="claude-opus-5-5"),
                    ProviderConfig(kind="openai_compatible", model="m", base_url="https://api.openai.com/v1")):
         assert asyncio.run(fetch_balance(config)) is None
+
+
+def test_list_price_matches_dated_model_ids_only():
+    from llm_providers import list_price
+    assert list_price("claude-opus-5-5") == (4.0, 20.0)
+    assert list_price("claude-haiku-4-5-20251001") == (1.0, 5.0)
+    assert list_price("gpt-unknown") is None   # never guess a price
+
+
+def test_provider_request_limits_are_not_reported_as_out_of_credit():
+    import httpx
+    import openai
+    from llm_providers import _openai_error
+
+    def err(details, message="You exceeded your current quota, please check your plan and billing details."):
+        body = {"error": {"code": 429, "message": message, "details": details}}
+        return openai.RateLimitError(str([body]), response=httpx.Response(429, request=httpx.Request("POST", "https://x")),
+                                     body=body)
+
+    daily = _openai_error(err([{"quotaId": "GenerateRequestsPerDayPerProjectPerModel-FreeTier", "quotaValue": "20"},
+                               {"retryDelay": "19s"}]))
+    assert not daily.no_credit and not daily.retryable and "Daily free-tier request limit reached (20" in daily.message
+    minute = _openai_error(err([{"quotaId": "GenerateRequestsPerMinutePerProjectPerModel-FreeTier"}]))
+    assert minute.retryable and not minute.no_credit
+    assert _openai_error(err([], message="insufficient_quota: You exceeded your current quota")).no_credit

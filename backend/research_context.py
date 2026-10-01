@@ -102,6 +102,19 @@ def build_package(item, overview: Optional[dict], news_cache: list[dict], data_s
         "fii_net_cr": _r(flows.get("fii_activity")),
         "dii_net_cr": _r(flows.get("dii_activity")),
     }
+    # Official NSE facts: results date, F&O ban, delivery from the bhavcopy, bulk/block deals.
+    ex = getattr(item, "exchange", None) or {}
+    delivery = ex.get("delivery") or {}
+    facts.update({
+        "results_date": ex["results_date"].isoformat() if ex.get("results_date") else None,
+        "fo_ban": ex.get("fo_ban"),
+        "delivery_date": delivery["date"].isoformat() if delivery.get("date") else None,
+        "delivery_pct": _r(delivery.get("deliv_pct"), 1),
+        "delivery_avg_20": _r(delivery.get("deliv_avg_20"), 1),
+        "nse_close": _r(delivery.get("close")),
+        "deals": [f"{d['kind']} deal {d['side'].lower()} {d['qty']:,.0f} @ {d['price']:.2f} by {d['client']}"
+                  for d in (ex.get("deals") or [])],
+    })
 
     headlines: list[Headline] = []
     reads = {r["title"]: r for r in (item.sentiment.get("ai_reads") or [])}
@@ -168,6 +181,10 @@ def render(package: ResearchPackage) -> str:
         f"Returns: 20-day {_v(f['return_20d'], '%')}, 60-day {_v(f['return_60d'], '%')}; vs NIFTY over 20 days "
         f"{_v(f['relative_strength_20d'], '%')}",
         f"Sector {_v(f['sector'])}{' (a leading sector today)' if f.get('sector_leading') else ''}",
+        f"NSE (official): close {_v(f.get('nse_close'))} on {_v(f.get('delivery_date'))}, delivery "
+        f"{_v(f.get('delivery_pct'), '%')} vs 20-session average {_v(f.get('delivery_avg_20'), '%')}; "
+        f"results board meeting within 7 days: {_v(f.get('results_date')) if f.get('results_date') else 'none scheduled'}; "
+        f"in F&O ban: {_v(f.get('fo_ban'))}; bulk/block deals: {_v(f.get('deals')) if f.get('deals') else 'none reported'}",
         "",
         f"MARKET: regime {_v(f['market_regime'])} ({_v(f['regimes'])}); NIFTY trend {_v(f['nifty_trend'])}, "
         f"today {_v(f['nifty_change_pct'], '%')}; India VIX {_v(f['vix'])}; FII net {_v(f['fii_net_cr'], ' cr')}, "

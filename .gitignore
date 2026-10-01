@@ -40,3 +40,6 @@ Thumbs.db
 secrets/
 credentials*.json
 *.secret
+
+# Backups contain your trades, holdings and everything the app learned (Settings -> Backup & restore)
+backend/backups/

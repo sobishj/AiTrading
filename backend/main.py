@@ -19,6 +19,7 @@ handling, and the always-on background engine (PRD §11, §13, §18):
 Every change is broadcast to connected clients over WebSocket.
 """
 import asyncio
+import time
 from contextlib import asynccontextmanager
 from datetime import datetime, time as dtime, timedelta, timezone
 
@@ -33,9 +34,13 @@ from api.ai_routes import router as ai_router
 from api.llm_routes import router as llm_router
 from api.portfolio_routes import router as portfolio_router
 from api.routes import connection_manager, refresh_and_broadcast, router
+from api.settings_routes import router as settings_router
 from brief_service import brief_service
 from config import settings
 from data_provider import yahoo_provider
+from discovery_service import discovery_service
+from nse_service import nse_service
+from preferences import general
 from database import db_session, init_db
 from kite_service import kite_service
 from learning_service import learning_service
@@ -199,6 +204,44 @@ def enqueue_ai_reflection(force: bool = False) -> None:
 # How often the ranking loop checks the current (possibly just-changed)
 # refresh setting — NOT the refresh cadence itself.
 _SETTINGS_POLL_SECONDS = 5
+async def _startup_discovery() -> None:
+    """Catch up a missed run: never run before, or a weekday whose scheduled screen didn't happen."""
+    if not general()["discovery_enabled"]:
+        return
+    from models import UniverseScreen
+    await asyncio.sleep(90)   # let startup settle (and the scheduler run first if it is already due)
+    if discovery_service.running:
+        return
+    now = datetime.now(IST)
+    with db_session() as db:
+        never = db.query(UniverseScreen.id).filter(UniverseScreen.selected_count > 0).first() is None
+        missed = (now.weekday() < 5 and now.time() >= _parse_hhmm(general()["universe_screen_time"], dtime(8, 20))
+                  and not discovery_service.ran_today(db))
+    if never or missed:
+        await run_discovery(trigger="startup")
+
+
+async def run_discovery(trigger: str = "scheduled", delay: float = 0) -> None:
+    """Pick the day's Auto list from the whole market (real-data screen + AI review), then re-rank."""
+    try:
+        if delay:
+            await asyncio.sleep(delay)
+        with db_session() as db:
+            result = await discovery_service.run(db, trigger=trigger)
+            if result.get("skipped"):
+                return
+            if result.get("selected_count"):
+                await refresh_and_broadcast(
+                    db, trigger=f"Today's Auto list: {result['selected_count']} best of {result['pool_size']} "
+                                f"shares ({len(result['added'])} new)")
+        await connection_manager.broadcast({"type": "discovery_update", **{k: result[k] for k in (
+            "pool_size", "eligible", "ai_reviewed", "selected_count", "added", "note") if k in result}})
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        logger.error("Discovery run failed: %s", exc, exc_info=True)
+
+
 _SCHEDULER_POLL_SECONDS = 30
 
 
@@ -241,8 +284,28 @@ async def _news_watch_loop() -> None:
     headline mentions a watchlist stock, re-rank at once and tell the UI why.
     """
     seen: set[str] | None = None
+    seen_filings: set[tuple[str, str]] | None = None
+    bhav_checked = 0.0
     while True:
         try:
+            await nse_service.refresh()          # filings, results calendar, F&O ban, deals (each on its own TTL)
+            if time.monotonic() - bhav_checked > 3600:   # NSE's end-of-day file appears around 6 pm
+                bhav_checked = time.monotonic()
+                with db_session() as db:
+                    await nse_service.ensure_bhavcopy(db)
+            with db_session() as db:
+                stocks = db.query(Stock).filter(tracked_stock_filter()).all()
+                filings = [(stock, f) for stock in stocks for f in nse_service.filings_for(stock.symbol)]
+                keys = {(stock.symbol, f["title"]) for stock, f in filings}
+                if seen_filings is not None:
+                    new = [(stock, f) for stock, f in filings if (stock.symbol, f["title"]) not in seen_filings]
+                    if new:
+                        enqueue_ai_news(new)
+                        stock, item = new[0]
+                        trigger = f"NSE filing from {stock.name}: {item['category']}"
+                        logger.info("Filing trigger: %s", trigger)
+                        await refresh_and_broadcast(db, trigger=trigger)
+                seen_filings = (seen_filings or set()) | keys
             news = await market_service.fetch_news_async(force_refresh=True)
             titles = {item["title"] for item in news}
             if seen is None:
@@ -287,6 +350,7 @@ async def _daily_scheduler_loop() -> None:
     brief_at = _parse_hhmm(settings.MORNING_BRIEF_TIME, dtime(8, 30))
     learn_at = _parse_hhmm(settings.POST_MARKET_LEARNING_TIME, dtime(16, 0))
     forecast_at = _parse_hhmm(settings.AI_FORECAST_TIME, dtime(8, 45))
+    last_screen_date = None
     last_brief_date = None
     last_learning_date = None
     last_forecast_date = None
@@ -304,6 +368,14 @@ async def _daily_scheduler_loop() -> None:
                     enqueue_ai_outlook()
                     last_outlook_run.add(key)
             if now.weekday() < 5:
+                prefs = general()       # read each pass: Settings -> General changes apply without a restart
+                if (prefs["discovery_enabled"] and last_screen_date != now.date()
+                        and now.time() >= _parse_hhmm(prefs["universe_screen_time"], dtime(8, 20))):
+                    with db_session() as db:
+                        done = discovery_service.ran_today(db)
+                    if not done and not discovery_service.running:
+                        asyncio.create_task(run_discovery())
+                    last_screen_date = now.date()
                 if last_brief_date != now.date() and now.time() >= brief_at:
                     with db_session() as db:
                         existing = brief_service.get_today(db)
@@ -316,7 +388,10 @@ async def _daily_scheduler_loop() -> None:
                             await connection_manager.broadcast(
                                 {"type": "morning_brief", **brief_service.to_payload(brief)})
                     last_brief_date = now.date()
-                if last_forecast_date != now.date() and now.time() >= forecast_at:
+                # Forecasts follow discovery: its AI review already forecast the shortlist, and the
+                # top 10 should come from today's list, so wait while it is still running.
+                if (last_forecast_date != now.date() and now.time() >= forecast_at
+                        and not discovery_service.running):
                     # Idempotent: stocks already forecast today are skipped.
                     enqueue_ai_forecasts()
                     last_forecast_date = now.date()
@@ -348,6 +423,9 @@ async def lifespan(app: FastAPI):
         migrate_plaintext_keys()   # any API key still in the database moves to Windows Credential Manager
     except Exception as exc:  # noqa: BLE001
         logger.warning("API-key migration skipped: %s", exc.__class__.__name__)
+    from sources_service import sources_service
+    with db_session() as db:
+        sources_service.seed(db)          # built-in news feeds and NSE sources (Settings -> Data sources)
     llm_service.reload_profiles()
     llm_service.start_worker()
     if settings.AI_ANALYST_ENABLED:
@@ -367,6 +445,7 @@ async def lifespan(app: FastAPI):
         asyncio.create_task(_news_watch_loop()),
         asyncio.create_task(_daily_scheduler_loop()),
         asyncio.create_task(run_factor_study(delay=120)),   # first run / weekly refresh, after startup settles
+        asyncio.create_task(_startup_discovery()),
     ])
     yield
     logger.info("Shutting down %s", settings.APP_NAME)
@@ -416,6 +495,7 @@ app.include_router(router, prefix="/api")
 app.include_router(portfolio_router, prefix="/api")
 app.include_router(llm_router, prefix="/api")
 app.include_router(ai_router, prefix="/api")
+app.include_router(settings_router, prefix="/api")
 
 
 # ---------------------------------------------------------------------------

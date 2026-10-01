@@ -11,8 +11,9 @@ horizon the ranking engine targets.
 """
 import asyncio
 import time
-from datetime import datetime, timedelta
+from datetime import date, datetime, time as dtime, timedelta
 from typing import Optional
+from zoneinfo import ZoneInfo
 
 import httpx
 import pandas as pd
@@ -79,17 +80,77 @@ def clean_daily_candles(frame: pd.DataFrame, symbol: str = "") -> pd.DataFrame:
 
     ratio = df["open"] / df["close"].shift(1)
     low, high = CORPORATE_ACTION_GAP
+    adjustments: list[tuple[date, float]] = []
     for i in df.index[(ratio < low) | (ratio > high)]:
         factor = float(ratio[i])
         for col in ("open", "high", "low", "close"):
             df.loc[: i - 1, col] = df.loc[: i - 1, col] * factor
         df.loc[: i - 1, "volume"] = (df.loc[: i - 1, "volume"] / factor).round()
         when = str(df["date"].iloc[i])[:10] if "date" in df.columns else str(i)
+        if "date" in df.columns:
+            adjustments.append((_ist_date(df["date"].iloc[i]), factor))
         if (symbol, when) not in _logged_adjustments:
             _logged_adjustments.add((symbol, when))
             logger.info("Back-adjusted %s history for a corporate action on %s (factor %.4f)", symbol, when, factor)
     df["volume"] = df["volume"].astype("int64")
+    # Graders rescale prices stored before an action (see reference_price).
+    df.attrs["adjustments"] = adjustments
     return df
+
+
+def _ist_date(value) -> date:
+    ts = pd.Timestamp(value)
+    return (ts.tz_convert(IST) if ts.tzinfo else ts).date()
+
+
+# Yahoo/Kite keep publishing the day's bar while the session runs; its "close"
+# is the live price until shortly after 15:30 IST.
+FINAL_BAR_AFTER = dtime(16, 0)
+
+
+def completed_daily_bars(candles: pd.DataFrame, now: Optional[datetime] = None) -> pd.DataFrame:
+    """
+    Daily candles without today's still-forming bar. Grading against a live
+    price as if it were the close would record outcomes that never happened.
+    """
+    if candles is None or candles.empty or "date" not in candles.columns:
+        return candles
+    now = now or datetime.now(ZoneInfo(IST))
+    if now.weekday() < 5 and now.time() >= FINAL_BAR_AFTER:
+        return candles
+    if _ist_date(candles["date"].iloc[-1]) < now.date():
+        return candles
+    out = candles.iloc[:-1]
+    out.attrs = dict(candles.attrs)
+    return out
+
+
+def reference_price(candles: pd.DataFrame, day: date, price: float) -> tuple[float, float]:
+    """
+    Put a price recorded on `day` on the same scale as `candles`, returning
+    (price, scale). A split or bonus after `day` makes the raw price
+    incomparable with the bars that follow (a 1:2 split would grade as a 50%
+    crash). Our own back-adjustments are applied exactly; if the series still
+    disagrees with the price by more than a corporate-action gap (the feed
+    adjusted it itself), the series' own close on `day` is the reference.
+    """
+    scale = 1.0
+    for when, factor in (candles.attrs.get("adjustments") or []):
+        if when > day:
+            scale *= factor
+    adjusted = price * scale
+    if candles is None or candles.empty or "date" not in candles.columns:
+        return adjusted, scale
+    dates = [_ist_date(d) for d in candles["date"]]
+    upto = [i for i, d in enumerate(dates) if d <= day]
+    if upto:
+        close = float(candles["close"].iloc[upto[-1]])
+        low, high = CORPORATE_ACTION_GAP
+        if adjusted > 0 and not (low <= close / adjusted <= high):
+            logger.warning("Price %.2f recorded on %s is off-scale with the series (close %.2f); "
+                           "grading from the series' close", price, day, close)
+            return close, close / price
+    return adjusted, scale
 
 
 def to_yahoo_symbol(symbol: str) -> str:

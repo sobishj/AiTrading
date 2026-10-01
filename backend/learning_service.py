@@ -21,6 +21,7 @@ import pandas as pd
 from sqlalchemy.orm import Session
 
 from analysis_service import ALL_STRATEGIES, NO_SETUP
+from data_provider import completed_daily_bars, reference_price
 from market_service import market_service
 from memory_service import memory_service
 from models import Recommendation, Stock, TradeHistory
@@ -55,15 +56,27 @@ def _to_ist_date(ts: datetime) -> date:
 def grade_against_candles(rec: Recommendation, candles: pd.DataFrame) -> Optional[dict]:
     """
     Replay a BUY recommendation on the bars after it was issued. Returns None
-    while it's unresolved and its holding window hasn't finished yet.
+    while it's unresolved and its holding window hasn't finished yet. Only
+    finished sessions count, and the plan's levels are rescaled if a split or
+    bonus happened after it was issued; the exit price is reported back on the
+    recommendation's own scale so it compares with its entry.
     """
-    entry_low = float(rec.entry_low if rec.entry_low is not None else rec.entry_price)
-    entry_high = float(rec.entry_high if rec.entry_high is not None else rec.entry_price)
-    entry = float(rec.entry_price)
-    stop, target = float(rec.stop_loss), float(rec.target_price)
-    max_bars = parse_holding_days(rec.holding_period)
-
+    candles = completed_daily_bars(candles)
     issued = _to_ist_date(rec.timestamp)
+    _, scale = reference_price(candles, issued, float(rec.entry_price))
+    entry_low = float(rec.entry_low if rec.entry_low is not None else rec.entry_price) * scale
+    entry_high = float(rec.entry_high if rec.entry_high is not None else rec.entry_price) * scale
+    entry = float(rec.entry_price) * scale
+    stop, target = float(rec.stop_loss) * scale, float(rec.target_price) * scale
+    max_bars = parse_holding_days(rec.holding_period)
+    result = _replay(candles, issued, entry_low, entry_high, entry, stop, target, max_bars)
+    if result and result["exit_price"] is not None:
+        result["exit_price"] = round(result["exit_price"] / scale, 2)
+    return result
+
+
+def _replay(candles: pd.DataFrame, issued: date, entry_low: float, entry_high: float, entry: float,
+            stop: float, target: float, max_bars: int) -> Optional[dict]:
     dates = pd.to_datetime(candles["date"])
     if dates.dt.tz is not None:
         dates = dates.dt.tz_convert("Asia/Kolkata")

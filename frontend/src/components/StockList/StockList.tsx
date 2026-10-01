@@ -1,5 +1,6 @@
 import { FormEvent, ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import type { ListMode, Stock } from "../../services/types";
+import DiscoveryBar from "./DiscoveryBar";
 import StockListItem from "./StockListItem";
 
 interface StockListProps {
@@ -24,7 +25,8 @@ const SYMBOL_RE = /^[A-Z0-9&-]{1,20}$/;
 
 /**
  * PRD §6 left panel: stock names only, strongest opportunity first.
- * - Auto: the AI-managed universe, ranked and re-ranked by the engine.
+ * - Auto: the best of the day, picked each weekday from the whole NIFTY 500 (real-data screen,
+ *   then AI review — see DiscoveryBar), and re-ranked live by the engine.
  * - Manual: the user's own list; shares can be added and removed here, and
  *   each gets the same chart, trade plan, analysis and chat.
  * The search box filters the list in both modes; in Manual mode it also
@@ -63,6 +65,9 @@ export default function StockList({
     const timer = setTimeout(() => setMoves({}), MOVE_HIGHLIGHT_MS);
     return () => clearTimeout(timer);
   }, [stocks]);
+
+  // Re-read how the list was picked whenever its membership changes (not on every re-rank).
+  const membership = useMemo(() => stocks.map((s) => s.symbol).sort().join(","), [stocks]);
 
   const q = query.trim().toUpperCase();
   const filtered = useMemo(() => {
@@ -121,7 +126,7 @@ export default function StockList({
               role="tab"
               aria-selected={mode === m}
               onClick={() => onModeChange(m)}
-              title={m === "auto" ? "AI-ranked market universe" : m === "manual" ? "Your own list — add and remove shares"
+              title={m === "auto" ? "Today's best shares, picked from the whole NIFTY 500 by real data and AI review" : m === "manual" ? "Your own list — add and remove shares"
                 : "Shares you bought — monitored for stop-loss, target and loss risk"}
               className={`flex-1 px-2 py-1 rounded-md text-xs font-medium transition-all duration-150 ${
                 mode === m ? "bg-neon-blue/15 text-neon-blue shadow-glow" : "text-slate-400 hover:text-slate-200"
@@ -147,6 +152,8 @@ export default function StockList({
           />
         </form>
         )}
+
+        {mode === "auto" && <DiscoveryBar refreshKey={membership} />}
 
         {addSuggestions.length > 0 && (
           <div className="space-y-0.5">
@@ -183,7 +190,7 @@ export default function StockList({
           </div>
         )}
         {!loading && !error && stocks.length === 0 && mode === "auto" && (
-          <div className="text-xs text-slate-500 px-3 py-4 text-center">The automatic universe is empty.</div>
+          <div className="text-xs text-slate-500 px-3 py-4 text-center">No shares picked yet — today's market-wide pick will fill this list.</div>
         )}
         {q && stocks.length > 0 && filtered.length === 0 && addSuggestions.length === 0 && (
           <div className="text-xs text-slate-500 px-3 py-4 text-center">No shares match “{query.trim()}”.</div>
@@ -201,7 +208,7 @@ export default function StockList({
       </div>
 
       <div className="px-4 py-1.5 border-t border-white/5 text-[10px] text-slate-600 flex justify-between">
-        <span>{mode === "auto" ? "AI-managed" : "Your list"}</span>
+        <span>{mode === "auto" ? "Best of the day" : "Your list"}</span>
         <span>
           {filtered.length}
           {q ? ` of ${stocks.length}` : ""} · best first

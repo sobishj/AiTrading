@@ -28,7 +28,7 @@ from database import db_session
 from evidence_engine import (ALL_CLAIM_KEYS, check_levels, enrich_facts, parse_claims, present_factors, verify)
 from knowledge_service import knowledge_service
 from llm_providers import ProviderConfig, ProviderError, build_provider
-from llm_service import llm_service
+from llm_service import llm_service, record_usage
 from models import AIConsensus, AIPrediction, AppSettings, LLMProfile, LLMUsage, ResearchContext
 from prompts.prompt_library import PromptLibrary
 from research_context import build_package, render
@@ -212,16 +212,7 @@ class AIOrchestrator:
 
     @staticmethod
     def record_usage(profile_id: int, ok: bool, input_tokens: int = 0, output_tokens: int = 0) -> None:
-        with db_session() as db:
-            row = db.query(LLMUsage).filter(LLMUsage.profile_id == profile_id, LLMUsage.hour == _hour()).first()
-            if row is None:
-                row = LLMUsage(profile_id=profile_id, hour=_hour(), requests=0, failures=0, input_tokens=0,
-                               output_tokens=0)
-                db.add(row)
-            row.requests += 1
-            row.failures += 0 if ok else 1
-            row.input_tokens += input_tokens
-            row.output_tokens += output_tokens
+        record_usage(profile_id, ok, input_tokens, output_tokens)
 
     def _provider(self, profile: ProfileSnapshot):
         key = (profile.id, profile.updated_at)
@@ -311,9 +302,11 @@ class AIOrchestrator:
         regime = regimes[0] if regimes else None
         factors = present_factors(package.facts)
         knowledge = knowledge_service.knowledge_block(db, item.stock_id, factors, regime)
+        _, lessons = ai_analyst_service.current_lessons(db)
         prompt = PromptLibrary.structured_analysis(
             name=item.name, symbol=item.symbol, horizon=HORIZON_DAYS, collected_at=package.collected_at,
             data_source=package.data_source, context=render(package), knowledge=knowledge,
+            lessons=ai_analyst_service.lessons_block(lessons),
             trader=trader_profile_service.block(db, item.symbol), claim_keys=", ".join(ALL_CLAIM_KEYS))
         ctx = ResearchContext(stock_id=item.stock_id, content_hash=content_hash,
                               context_json=json.dumps(package.to_json(), default=str), prompt_text=prompt,
@@ -353,7 +346,7 @@ class AIOrchestrator:
                             "evidence": report.to_json(), "level_issues": issues, "latency_ms": r["latency_ms"],
                             "input_tokens": r["input_tokens"], "output_tokens": r["output_tokens"],
                             "fallback": r.get("fallback", False), "raw": r["text"],
-                            "reliability_stats": knowledge_service.model_reliability(db, r["profile_id"], regime,
+                            "reliability_stats": knowledge_service.model_reliability(db, r["model"], regime,
                                                                                      item.strategy)})
 
         result = combine(members, knowledge_service.factor_stats_for(db, factors, regime), package.facts,
@@ -455,7 +448,7 @@ class AIOrchestrator:
             a = json.loads(p.analysis_json) if p.analysis_json else {}
             members.append({**a, "model": p.model, "profile_id": p.profile_id,
                             "recommendation": p.recommendation, "probability_up": float(p.probability_up),
-                            "reliability_stats": knowledge_service.model_reliability(db, p.profile_id, regime, strategy)})
+                            "reliability_stats": knowledge_service.model_reliability(db, p.model, regime, strategy)})
         result = combine(members, knowledge_service.factor_stats_for(db, present_factors(facts), regime), facts,
                          package.get("engine"))
         weights = {m["profile_id"]: m for m in result.members}

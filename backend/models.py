@@ -30,6 +30,10 @@ class Stock(Base):
     # The user's own "Manual" list, independent of the AI-managed "Auto" universe
     # (watchlist_status == "active"). A stock can be in either list or both.
     in_manual_list: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false", nullable=False)
+    # watchlist_status: "active" = in today's Auto list; "candidate" = in the market pool, not selected
+    # today; "excluded" = you removed it from Auto, so discovery never re-adds it; "inactive" = other.
+    # Last time NSE's NIFTY 500 list included this share (null = never seen there).
+    universe_seen_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     last_updated: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
     recommendations: Mapped[list["Recommendation"]] = relationship(back_populates="stock", cascade="all, delete-orphan")
@@ -119,6 +123,8 @@ class UserChat(Base):
     user_message: Mapped[str] = mapped_column(Text, nullable=False)
     ai_response: Mapped[str] = mapped_column(Text, nullable=False)
     stock_context: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    # Which saved model answered ("Claude (Anthropic API) · claude-opus-5-5"); null for older rows.
+    answered_by: Mapped[str | None] = mapped_column(String(300), nullable=True)
     timestamp: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
 
 
@@ -177,6 +183,13 @@ class AppSettings(Base):
     # "single" = one model (the background model), exactly the original behaviour;
     # "multi"  = every enabled model analyses independently, combined by the consensus engine.
     analysis_mode: Mapped[str] = mapped_column(String(10), default="single", server_default="single", nullable=False)
+    # General settings (Settings -> General). Null = use the config/.env default, so they travel in a backup
+    # once you change them and existing installs keep behaving exactly as before until you do.
+    discovery_enabled: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    universe_screen_time: Mapped[str | None] = mapped_column(String(5), nullable=True)      # "HH:MM" IST
+    auto_list_size: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    ai_review_shortlist: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    min_traded_value_cr: Mapped[float | None] = mapped_column(Numeric, nullable=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
@@ -285,7 +298,10 @@ class AIPrediction(Base):
 
 
 class AILesson(Base):
-    """A versioned set of lessons Qwen wrote after reviewing its graded predictions."""
+    """
+    A versioned set of shared lessons, written by the background model after reviewing the graded
+    forecasts of every model; every model (including newly added ones) reads the latest version.
+    """
     __tablename__ = "ai_lessons"
 
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -293,7 +309,8 @@ class AILesson(Base):
     lessons_text: Mapped[str] = mapped_column(Text, nullable=False)
     based_on_predictions: Mapped[int] = mapped_column(Integer, default=0)
     hit_rate_at_creation: Mapped[float | None] = mapped_column(Numeric, nullable=True)
-    model: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    model: Mapped[str | None] = mapped_column(String(100), nullable=True)                 # who wrote them
+    source_models: Mapped[str | None] = mapped_column(Text, nullable=True)               # whose graded forecasts
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 
@@ -512,6 +529,71 @@ class PatternStat(Base):
     last_observed: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
     __table_args__ = (UniqueConstraint("pattern", "bias", "regime", "timeframe", "source", name="uq_pattern_stat"),)
+
+
+class DataSource(Base):
+    """
+    A source the app reads for research (Settings -> Data sources). Built-in ones (the news feeds the
+    app shipped with, NSE's official data) can be switched off but not deleted; feeds you add can be.
+    """
+    __tablename__ = "data_sources"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    # rss = a news feed (RSS/Atom); nse_filings / nse_calendar / nse_bhavcopy / nse_ban / nse_deals = NSE data
+    kind: Mapped[str] = mapped_column(String(20), nullable=False, index=True)
+    name: Mapped[str] = mapped_column(String(120), nullable=False)
+    url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    builtin: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    last_ok_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    last_items: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class NSEDaily(Base):
+    """NSE's official end-of-day record per share (bhavcopy): close, volume and delivery."""
+    __tablename__ = "nse_daily"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    trade_date: Mapped[date] = mapped_column(Date, nullable=False, index=True)
+    symbol: Mapped[str] = mapped_column(String(20), nullable=False, index=True)
+    series: Mapped[str] = mapped_column(String(4), nullable=False)
+    prev_close: Mapped[float | None] = mapped_column(Numeric, nullable=True)
+    open: Mapped[float | None] = mapped_column(Numeric, nullable=True)
+    high: Mapped[float | None] = mapped_column(Numeric, nullable=True)
+    low: Mapped[float | None] = mapped_column(Numeric, nullable=True)
+    close: Mapped[float] = mapped_column(Numeric, nullable=False)
+    volume: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    deliv_qty: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    deliv_pct: Mapped[float | None] = mapped_column(Numeric, nullable=True)
+
+    __table_args__ = (UniqueConstraint("trade_date", "symbol", "series", name="uq_nse_daily"),)
+
+
+class UniverseScreen(Base):
+    """
+    One daily discovery run: how many shares were screened, why the rest were filtered out, what
+    the AI review said, and which shares made the Auto list (with each one's reason).
+    """
+    __tablename__ = "universe_screens"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    run_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
+    trigger: Mapped[str] = mapped_column(String(20), default="scheduled")
+    pool_size: Mapped[int] = mapped_column(Integer, default=0)
+    eligible: Mapped[int] = mapped_column(Integer, default=0)
+    ai_reviewed: Mapped[int] = mapped_column(Integer, default=0)
+    selected_count: Mapped[int] = mapped_column(Integer, default=0)
+    filtered_json: Mapped[str | None] = mapped_column(Text, nullable=True)     # {reason: count}
+    selected_json: Mapped[str | None] = mapped_column(Text, nullable=True)     # [{symbol, score, ai, why}]
+    added_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    removed_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    top_sectors: Mapped[str | None] = mapped_column(Text, nullable=True)
+    filings_read: Mapped[int] = mapped_column(Integer, default=0, server_default="0")   # NSE filings the AI read
+    note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    seconds: Mapped[float | None] = mapped_column(Numeric, nullable=True)
 
 
 class TraderProfile(Base):

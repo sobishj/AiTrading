@@ -12,10 +12,13 @@ from credential_store import delete_secret, store_secret
 from database import get_db
 import time
 
+from datetime import datetime, timedelta, timezone
+
+from data_provider import yahoo_provider
 from llm_providers import (PRESETS, ProviderConfig, ProviderError, balance_source, build_provider, fetch_balance,
-                           mask_key, resolve_key)
-from llm_service import llm_service
-from models import AppSettings, LLMProfile
+                           list_price, mask_key, resolve_key)
+from llm_service import llm_service, record_usage
+from models import AppSettings, LLMProfile, LLMUsage
 from ranking_service import ranking_service
 
 router = APIRouter()
@@ -238,15 +241,71 @@ async def check_credit(profile_id: int, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="Model profile not found")
     if not profile.is_local and not balance_source(_profile_config(profile)):
         try:
-            await build_provider(_profile_config(profile)).chat(
+            reply = await build_provider(_profile_config(profile)).chat_ex(
                 [{"role": "user", "content": "Reply with the single word: OK"}], max_tokens=5, temperature=0.0,
                 effort="low")
             llm_service.note_credit(profile.id)
+            record_usage(profile.id, True, reply.input_tokens, reply.output_tokens)
         except ProviderError as exc:
             llm_service.note_credit(profile.id, exc)
+            record_usage(profile.id, False)
             if not exc.no_credit:
                 return {**await _credit_for(profile, refresh=False), "error": exc.message}
     return await _credit_for(profile, refresh=True)
+
+
+IST = timezone(timedelta(hours=5, minutes=30))
+FX_CACHE_SECONDS = 900
+_fx_cache: tuple[float, Optional[dict]] = (0.0, None)
+
+
+async def _usd_inr() -> Optional[dict]:
+    """Live USD→INR rate from Yahoo (INR=X), cached 15 minutes; None if unavailable."""
+    global _fx_cache
+    if time.monotonic() - _fx_cache[0] < FX_CACHE_SECONDS and _fx_cache[1]:
+        return _fx_cache[1]
+    quote = await yahoo_provider.get_quote("INR=X")
+    fx = {"rate": quote["price"], "as_of": quote["as_of"]} if quote and quote.get("price") else None
+    _fx_cache = (time.monotonic(), fx)
+    return fx
+
+
+def _spend(db: Session, p: LLMProfile, since_utc: datetime) -> dict:
+    rows = db.query(LLMUsage).filter(LLMUsage.profile_id == p.id, LLMUsage.hour >= since_utc).all()
+    tin, tout = sum(r.input_tokens for r in rows), sum(r.output_tokens for r in rows)
+    return {"requests": sum(r.requests for r in rows), "input_tokens": tin, "output_tokens": tout}
+
+
+@router.get("/llm/spend")
+async def spend(db: Session = Depends(get_db)):
+    """
+    What AiTrading itself has spent per model, today and this month (IST), from
+    the tokens each provider reported x the model's price. Covers only calls
+    made by this app; the provider's console has the account-wide figure.
+    """
+    now = datetime.now(IST)
+    day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    month_start = day_start.replace(day=1)
+    to_utc = lambda d: d.astimezone(timezone.utc).replace(tzinfo=None)   # noqa: E731
+    fx = await _usd_inr()
+    out = []
+    for p in db.query(LLMProfile).order_by(LLMProfile.id):
+        entry = {"profile_id": p.id, "is_local": p.is_local, "fx": fx}
+        if p.input_price is not None or p.output_price is not None:
+            price, source = (float(p.input_price or 0), float(p.output_price or 0)), "model settings"
+        else:
+            price, source = list_price(p.model), "list price"
+        entry["price"] = ({"input": price[0], "output": price[1], "source": source}
+                          if price and not p.is_local else None)
+        for label, since in (("today", day_start), ("month", month_start)):
+            period = _spend(db, p, to_utc(since))
+            usd = 0.0 if p.is_local else (round(period["input_tokens"] / 1e6 * price[0]
+                                                + period["output_tokens"] / 1e6 * price[1], 4) if price else None)
+            period["usd"] = usd
+            period["inr"] = round(usd * fx["rate"], 2) if usd is not None and fx else None
+            entry[label] = period
+        out.append(entry)
+    return out
 
 
 @router.put("/llm/active")

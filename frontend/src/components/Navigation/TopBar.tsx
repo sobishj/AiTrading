@@ -14,7 +14,8 @@ interface TopBarProps {
   onAddStock: (symbol: string) => Promise<void>;
   onRefresh: () => void;
   onOpenLearning: () => void;
-  onOpenModels: () => void;
+  /** Settings window (data sources, general options, backup & restore). */
+  onOpenSettings: () => void;
   alertsKey: number;
   onAlertSelect: (symbol: string) => void;
   theme: Theme;
@@ -70,7 +71,7 @@ function StatusDot({ ok, label, title }: { ok: boolean; label: string; title: st
 /** PRD §5 top bar: brand, live status, search (jump to any share, or add an NSE symbol to your list), refresh, learning. */
 export default function TopBar({
   stocks, status, connected, refreshing, onSelect, onAddStock, onRefresh, onOpenLearning,
-  theme, onToggleTheme, onLayoutPreset, onOpenModels, alertsKey, onAlertSelect,
+  theme, onToggleTheme, onLayoutPreset, onOpenSettings, alertsKey, onAlertSelect,
 }: TopBarProps) {
   const [query, setQuery] = useState("");
   const [adding, setAdding] = useState(false);
@@ -189,12 +190,11 @@ export default function TopBar({
           {refreshing ? "Refreshing…" : "Refresh"}
         </button>
         <AlertsBell refreshKey={alertsKey} onSelect={onAlertSelect} />
-        <button
-          onClick={onOpenModels}
-          className="btn-secondary px-3 py-1.5 text-xs max-w-[11rem] truncate"
-          title={status?.models ? `Chat: ${status.models.chat?.name} (${status.models.chat?.model})\nBackground: ${status.models.background?.name} (${status.models.background?.model})` : "AI model settings"}
-        >
-          AI: {status?.models?.chat?.name ?? "models"}
+        <button onClick={onOpenSettings} className="btn-secondary px-3 py-1.5 text-xs"
+          title={"Settings: AI models, data sources, general options, backup & restore" + (status?.models
+            ? `\nChat AI: ${status.models.chat?.name} (${status.models.chat?.model})\nBackground AI: ${status.models.background?.name} (${status.models.background?.model})`
+            : "")}>
+          Settings
         </button>
         <button onClick={onOpenLearning} className="btn-secondary px-3 py-1.5 text-xs" title="Upload Zerodha trades, strategy performance, risk settings">
           Learning

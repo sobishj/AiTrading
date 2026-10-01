@@ -10,6 +10,14 @@ import type {
   TradingStyle,
   LLMProfile,
   ModelCredit,
+  ModelSpend,
+  DiscoveryStatus,
+  ModelCostStats,
+  DataSourceRow,
+  FeedTest,
+  GeneralSettings,
+  BackupEntry,
+  BackupReport,
   LLMProfileInput,
   LLMProfilesResponse,
   Position,
@@ -374,6 +382,97 @@ class ApiService {
 
   async getModelCredit(refresh = false): Promise<ModelCredit[]> {
     const { data } = await this.client.get<ModelCredit[]>("/llm/credit", { params: { refresh }, timeout: 30000 });
+    return data;
+  }
+
+  async getCostStats(): Promise<ModelCostStats[]> {
+    const { data } = await this.client.get<ModelCostStats[]>("/llm/cost-stats");
+    return data;
+  }
+
+  async getSources(): Promise<DataSourceRow[]> {
+    const { data } = await this.client.get<DataSourceRow[]>("/sources");
+    return data;
+  }
+
+  async testSource(url: string): Promise<FeedTest> {
+    const { data } = await this.client.post<FeedTest>("/sources/test", { url });
+    return data;
+  }
+
+  async addSource(url: string, name?: string): Promise<DataSourceRow> {
+    const { data } = await this.client.post<DataSourceRow>("/sources", { url, name });
+    return data;
+  }
+
+  async updateSource(id: number, patch: { enabled?: boolean; name?: string }): Promise<DataSourceRow> {
+    const { data } = await this.client.patch<DataSourceRow>(`/sources/${id}`, patch);
+    return data;
+  }
+
+  async deleteSource(id: number): Promise<void> {
+    await this.client.delete(`/sources/${id}`);
+  }
+
+  async restoreDefaultSources(): Promise<DataSourceRow[]> {
+    const { data } = await this.client.post<DataSourceRow[]>("/sources/restore-defaults");
+    return data;
+  }
+
+  async getGeneralSettings(): Promise<GeneralSettings> {
+    const { data } = await this.client.get<GeneralSettings>("/settings/general");
+    return data;
+  }
+
+  async saveGeneralSettings(patch: Partial<Omit<GeneralSettings, "defaults">>): Promise<GeneralSettings> {
+    const { data } = await this.client.put<GeneralSettings>("/settings/general", patch);
+    return data;
+  }
+
+  async listBackups(): Promise<BackupEntry[]> {
+    const { data } = await this.client.get<BackupEntry[]>("/backup/list");
+    return data;
+  }
+
+  async createBackup(): Promise<BackupEntry> {
+    const { data } = await this.client.post<BackupEntry>("/backup/create", undefined, { timeout: 300000 });
+    return data;
+  }
+
+  backupDownloadUrl(name: string): string {
+    return `${this.client.defaults.baseURL}/backup/download/${encodeURIComponent(name)}`;
+  }
+
+  async inspectBackupFile(file: File): Promise<BackupReport> {
+    const form = new FormData();
+    form.append("file", file);
+    const { data } = await this.client.post<BackupReport>("/backup/inspect", form, {
+      headers: { "Content-Type": "multipart/form-data" }, timeout: 300000 });
+    return data;
+  }
+
+  async inspectSavedBackup(name: string): Promise<BackupReport> {
+    const { data } = await this.client.post<BackupReport>(`/backup/inspect/${encodeURIComponent(name)}`);
+    return data;
+  }
+
+  async restoreBackup(name: string): Promise<{ restored_rows: number; safety_backup: string; models_needing_keys: string[] }> {
+    const { data } = await this.client.post("/backup/restore", { name }, { timeout: 600000 });
+    return data;
+  }
+
+  async getDiscoveryStatus(): Promise<DiscoveryStatus> {
+    const { data } = await this.client.get<DiscoveryStatus>("/universe/status");
+    return data;
+  }
+
+  async runDiscovery(): Promise<{ status: string }> {
+    const { data } = await this.client.post<{ status: string }>("/universe/run");
+    return data;
+  }
+
+  async getModelSpend(): Promise<ModelSpend[]> {
+    const { data } = await this.client.get<ModelSpend[]>("/llm/spend", { timeout: 30000 });
     return data;
   }
 

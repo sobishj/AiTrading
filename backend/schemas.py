@@ -255,6 +255,7 @@ class ChatMessageResponse(BaseModel):
     timestamp: datetime
     id: Optional[int] = None
     trade_proposal: Optional[dict] = None   # a trade you reported in chat, awaiting your confirmation
+    answered_by: Optional[str] = None       # the model that wrote ai_response (null = AiTrading itself / older rows)
 
 
 # ---------------------------------------------------------------------------

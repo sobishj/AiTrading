@@ -77,6 +77,11 @@ EARNINGS_BONUS = 3.0
 TIMING_WEIGHT = 5.0
 MAX_TIMING_ADJUSTMENT = 20.0
 TIMING_NOTE_THRESHOLD = 2.0
+# Official NSE data (nse_service). Small, labelled adjustments — information, not a strategy of their own.
+RESULTS_RISK_PENALTY = 3.0        # results board meeting inside the swing window: the price can gap either way
+FO_BAN_PENALTY = 2.0              # open interest above 95% of the limit: crowded, speculative positioning
+DELIVERY_ADJUSTMENT = 2.0         # a move on unusually high delivery (shares actually taken, not day-traded)
+DELIVERY_RATIO_MIN = 1.3
 
 # No new BUY idea from a still-forming bar until this share of the session has
 # passed (~10:15 IST): opening prices and volumes are too noisy to act on.
@@ -114,6 +119,8 @@ class RankedStock:
     base_score: float = 0.0
     adjustments: dict = field(default_factory=dict)
     tags: list[str] = field(default_factory=list)
+    # Official NSE facts (nse_service.exchange_facts): results date, F&O ban, delivery, deals, filings.
+    exchange: dict = field(default_factory=dict)
 
     @property
     def action(self) -> str:
@@ -236,9 +243,17 @@ class RankingService:
                          context: Optional[RankingContext] = None) -> RankedStock:
         """Score one stock (technical + sentiment + volume, then evidence adjustments and a trade plan)."""
         context = context or self._context
-        weights = weights or context.weights
         candle_provider = candle_provider or self.candle_provider
         candles = await candle_provider(stock)
+        # Indicator maths is CPU work: run it off the event loop so API requests keep being served
+        # while hundreds of shares are scored (the daily discovery screen scores ~500).
+        return await asyncio.to_thread(self.score_candles, stock, candles, weights, context)
+
+    def score_candles(self, stock: Stock, candles, weights: Optional[tuple[float, float, float]] = None,
+                      context: Optional[RankingContext] = None) -> RankedStock:
+        """The scoring half of rank_stock, for candles already fetched (pure; safe in a worker thread)."""
+        context = context or self._context
+        weights = weights or context.weights
         technical = analysis_service.compute_indicators(stock.symbol, candles, context.benchmark_return_20d)
         sentiment = market_service.stock_sentiment(stock.symbol, stock.name, self._keywords(stock))
         ai_news = context.ai_news.get(stock.symbol)
@@ -249,10 +264,11 @@ class RankingService:
                          "news_count": max(sentiment["news_count"], len(ai_news["reads"]))}
         base, volume_component = self._composite_score(technical, sentiment, weights)
 
+        from nse_service import nse_service  # local import: keeps module start-up light
         item = RankedStock(
             stock_id=stock.id, symbol=stock.symbol, name=stock.name, sector=stock.sector,
             conviction_score=base, base_score=base, technical=technical,
-            sentiment=sentiment, volume_score=volume_component,
+            sentiment=sentiment, volume_score=volume_component, exchange=nse_service.exchange_facts(stock.symbol),
         )
         self._apply_strategy_and_evidence(item, context)
         return item
@@ -297,6 +313,8 @@ class RankingService:
             from ai_analyst_service import AIAnalystService  # local import: avoids a cycle
             adjustments["ai_view"] = AIAnalystService.conviction_adjustment(forecast[0], context.ai_trust)
 
+        self._apply_exchange_facts(item, adjustments)
+
         timing = timing_score(t)
         adjustments["timing"] = round(_clamp(TIMING_WEIGHT * timing, -MAX_TIMING_ADJUSTMENT, MAX_TIMING_ADJUSTMENT), 2)
         if timing >= TIMING_NOTE_THRESHOLD:
@@ -311,6 +329,23 @@ class RankingService:
         item.conviction_score = round(_clamp(item.base_score + sum(adjustments.values()), 0.0, 100.0), 2)
         item.plan = analysis_service.build_trade_plan(t, strategy, item.conviction_score, context.market_regime,
                                                       context.market_uptrend)
+
+    @staticmethod
+    def _apply_exchange_facts(item: RankedStock, adjustments: dict) -> None:
+        ex = item.exchange or {}
+        if ex.get("results_date"):
+            adjustments["results_risk"] = -RESULTS_RISK_PENALTY
+            item.tags.append(f"Results due {ex['results_date']:%d %b} — the price can gap either way")
+        if ex.get("fo_ban"):
+            adjustments["fo_ban"] = -FO_BAN_PENALTY
+            item.tags.append("In the F&O ban list — open interest above 95% of the limit (crowded trade)")
+        d = ex.get("delivery") or {}
+        ratio, change = d.get("deliv_ratio"), d.get("change_pct")
+        if ratio is not None and change is not None and ratio >= DELIVERY_RATIO_MIN and abs(change) >= 0.5:
+            up = change > 0
+            adjustments["delivery"] = DELIVERY_ADJUSTMENT if up else -DELIVERY_ADJUSTMENT
+            item.tags.append(f"{'Up' if up else 'Down'} {abs(change):.1f}% on {d['deliv_pct']:.0f}% delivery "
+                             f"({ratio:.1f}x its 20-day average) — {'real buying' if up else 'real selling'}")
 
     # ------------------------------------------------------------------
     # Ranking run
@@ -346,13 +381,13 @@ class RankingService:
         )
 
     @staticmethod
-    def _leading_sectors(ranked: list[RankedStock], top_n: int = 2) -> list[str]:
-        """Sectors (2+ stocks) with the best average 20-day relative strength, if positive."""
+    def _leading_sectors(ranked: list[RankedStock], top_n: int = 2, min_members: int = 2) -> list[str]:
+        """Sectors (min_members+ stocks) with the best average 20-day relative strength, if positive."""
         by_sector: dict[str, list[float]] = defaultdict(list)
         for item in ranked:
             if item.sector and item.technical.relative_strength_20d is not None:
                 by_sector[item.sector].append(item.technical.relative_strength_20d)
-        averages = {sector: sum(v) / len(v) for sector, v in by_sector.items() if len(v) >= 2}
+        averages = {sector: sum(v) / len(v) for sector, v in by_sector.items() if len(v) >= min_members}
         leaders = sorted(averages, key=averages.get, reverse=True)[:top_n]
         return [s for s in leaders if averages[s] > 0]
 
@@ -399,8 +434,11 @@ class RankingService:
                 *(self.rank_stock(stock, self.candle_provider, context.weights, context) for stock in stocks)
             ))
 
-            # Sector rotation needs the whole universe, so tag it in a second pass.
-            context.top_sectors = self._leading_sectors(ranked)
+            # Sector rotation needs the whole universe, so tag it in a second pass. Today's discovery
+            # screen measured sectors across the whole market; the tracked shares alone are the
+            # strongest few and would skew that comparison.
+            from discovery_service import discovery_service  # local import: discovery imports us
+            context.top_sectors = discovery_service.market_top_sectors() or self._leading_sectors(ranked)
             if context.top_sectors:
                 for item in ranked:
                     item.tags.clear()

@@ -1,5 +1,6 @@
 import { FormEvent, useEffect, useRef, useState } from "react";
 import { useChat } from "../../hooks/useChat";
+import apiService from "../../services/api";
 import Markdown from "./Markdown";
 import TradeProposalCard from "./TradeProposalCard";
 
@@ -18,6 +19,14 @@ export default function ChatPanel({ symbol, name, topName, secondName, llmAvaila
   const { messages, sending, error, sendMessage, clear } = useChat(symbol);
   const [input, setInput] = useState("");
   const scrollRef = useRef<HTMLDivElement>(null);
+  // The model chosen for chat right now (AI models → "Chat & analyst notes"), for the "thinking" line.
+  const [chatModel, setChatModel] = useState<{ name: string; local: boolean } | null>(null);
+  const loadChatModel = () =>
+    apiService.getStatus().then((s) => {
+      const m = s.models?.chat;
+      setChatModel(m ? { name: m.name, local: Boolean(m.local) } : null);
+    }).catch(() => {});
+  useEffect(() => { loadChatModel(); }, []);
 
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
@@ -33,6 +42,7 @@ export default function ChatPanel({ symbol, name, topName, secondName, llmAvaila
   const submit = (text: string) => {
     if (!text.trim() || sending) return;
     setInput("");
+    loadChatModel();   // the model may have been switched since the panel opened
     sendMessage(text);
   };
 
@@ -85,6 +95,9 @@ export default function ChatPanel({ symbol, name, topName, secondName, llmAvaila
               }`}
             >
               {m.role === "assistant" ? <Markdown text={m.content} /> : m.content}
+              {m.role === "assistant" && m.answeredBy && (
+                <div className="mt-1 text-[10px] text-slate-500">Answered by {m.answeredBy}</div>
+              )}
               {m.role === "assistant" && m.tradeProposal && (
                 <TradeProposalCard proposal={m.tradeProposal} onRecorded={() => onTradeRecorded?.()} />
               )}
@@ -93,7 +106,8 @@ export default function ChatPanel({ symbol, name, topName, secondName, llmAvaila
         ))}
         {sending && (
           <div className="text-xs text-slate-500 animate-pulse">
-            AiTrading is thinking… (the local model can take up to a minute)
+            {chatModel ? `${chatModel.name} is thinking…` : "AiTrading is thinking…"}
+            {chatModel?.local ? " (a local model can take up to a minute)" : ""}
           </div>
         )}
         {error && <div className="text-xs text-neon-rose">{error}</div>}

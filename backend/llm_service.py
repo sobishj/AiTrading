@@ -42,7 +42,29 @@ IST = timezone(timedelta(hours=5, minutes=30))
 ROLES = ("chat", "background")
 
 # Re-exported for callers/tests that import it from here.
-__all__ = ["llm_service", "clean_output", "ungrounded_numbers", "LLMService"]
+__all__ = ["llm_service", "clean_output", "ungrounded_numbers", "record_usage", "LLMService"]
+
+
+def usage_hour(now: Optional[datetime] = None) -> datetime:
+    """UTC hour bucket for llm_usage rows."""
+    return (now or datetime.utcnow()).replace(minute=0, second=0, microsecond=0)
+
+
+def record_usage(profile_id: int, ok: bool, input_tokens: int = 0, output_tokens: int = 0) -> None:
+    """Count one request and its tokens for a profile (hourly caps and the spend estimate)."""
+    from database import db_session
+    from models import LLMUsage
+
+    with db_session() as db:
+        row = db.query(LLMUsage).filter(LLMUsage.profile_id == profile_id, LLMUsage.hour == usage_hour()).first()
+        if row is None:
+            row = LLMUsage(profile_id=profile_id, hour=usage_hour(), requests=0, failures=0, input_tokens=0,
+                           output_tokens=0)
+            db.add(row)
+        row.requests += 1
+        row.failures += 0 if ok else 1
+        row.input_tokens += input_tokens
+        row.output_tokens += output_tokens
 
 _NUMBER_RE = re.compile(r"(?<![\w.])\d[\d,]*(?:\.\d+)?")
 # Integers this small are usually counts ("3 reasons", "2 days"), not data.
@@ -167,7 +189,10 @@ class LLMService:
         return bool(p and p.allow_practice)
 
     def describe(self) -> dict:
-        return {role: ({"id": p.id, "name": p.name, "kind": p.kind, "model": p.model} if (p := self.active(role)) else None)
+        return {role: ({"id": p.id, "name": p.name, "kind": p.kind, "model": p.model,
+                        "local": p.kind != "anthropic" and any(h in (p.base_url or "").lower()
+                                                               for h in ("localhost", "127.0.0.1"))}
+                       if (p := self.active(role)) else None)
                 for role in ROLES}
 
     # ------------------------------------------------------------------
@@ -221,12 +246,14 @@ class LLMService:
         if profile is None or not await self.is_available(role) or not self._consume(profile):
             return None
         try:
-            text = await self._provider(profile).chat(messages, max_tokens=max_tokens, temperature=temperature,
-                                                      effort=effort)
+            reply = await self._provider(profile).chat_ex(messages, max_tokens=max_tokens, temperature=temperature,
+                                                          effort=effort)
             self.note_credit(profile.id)
-            return text or None
+            record_usage(profile.id, bool(reply.text), reply.input_tokens, reply.output_tokens)
+            return reply.text or None
         except ProviderError as exc:
             self.note_credit(profile.id, exc)
+            record_usage(profile.id, False)
             logger.error("LLM %s call failed (%s): %s", role, profile.name, exc.message)
             if exc.retryable:
                 self._availability.pop(profile.id, None)
@@ -365,12 +392,14 @@ class LLMService:
         if not self._consume(profile):
             return f"'{profile.name}' has reached its daily request limit ({profile.daily_limit}). Raise it in the AI model settings."
         try:
-            text = await self._provider(profile).chat(messages, max_tokens=900,
-                                                      temperature=settings.LLM_TEMPERATURE, effort="medium")
+            reply = await self._provider(profile).chat_ex(messages, max_tokens=900,
+                                                          temperature=settings.LLM_TEMPERATURE, effort="medium")
             self.note_credit(profile.id)
-            return text or "I don't have an answer to that yet."
+            record_usage(profile.id, bool(reply.text), reply.input_tokens, reply.output_tokens)
+            return reply.text or "I don't have an answer to that yet."
         except ProviderError as exc:
             self.note_credit(profile.id, exc)
+            record_usage(profile.id, False)
             logger.error("Chat failed (%s): %s", profile.name, exc.message)
             self._availability.pop(profile.id, None)
             return f"The chat model ({profile.name}) failed to answer: {exc.message}"

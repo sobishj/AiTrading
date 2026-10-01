@@ -10,7 +10,7 @@ import StockList from "./components/StockList/StockList";
 import HoldingWindow from "./components/Holdings/HoldingWindow";
 import HoldingsList from "./components/Holdings/HoldingsList";
 import PositionDialog from "./components/Holdings/PositionDialog";
-import ModelSettingsModal from "./components/Settings/ModelSettingsModal";
+import SettingsModal, { type SettingsTab } from "./components/Settings/SettingsModal";
 import TradePlanCard from "./components/TradePlan/TradePlanCard";
 import { usePositions } from "./hooks/usePositions";
 import { useResource } from "./hooks/useResource";
@@ -42,7 +42,7 @@ export default function App() {
   const current = listMode === "manual" ? manual : auto;
   const holdings = usePositions();
   const [alertsKey, setAlertsKey] = useState(0);
-  const [modelsOpen, setModelsOpen] = useState(false);
+  const [settingsTab, setSettingsTab] = useState<SettingsTab | null>(null);
   const [addHoldingOpen, setAddHoldingOpen] = useState(false);
   const [openHoldingId, setOpenHoldingId] = useState<number | null>(null);
   const stocks = current.stocks;
@@ -223,7 +223,7 @@ export default function App() {
             onAddStock={handleAddToManual}
             onRefresh={handleRefresh}
             onOpenLearning={() => setLearningOpen(true)}
-            onOpenModels={() => setModelsOpen(true)}
+            onOpenSettings={() => setSettingsTab("sources")}
             alertsKey={alertsKey}
             onAlertSelect={(symbol) => {
               handleSelect(symbol);
@@ -291,8 +291,9 @@ export default function App() {
       {openHoldingId !== null && (
         <HoldingWindow positionId={openHoldingId} onClose={() => setOpenHoldingId(null)} onChanged={onPositionChanged} />
       )}
-      {modelsOpen && (
-        <ModelSettingsModal onClose={() => setModelsOpen(false)} onChanged={() => setStatusVersion((v) => v + 1)} />
+      {settingsTab && (
+        <SettingsModal initialTab={settingsTab} onClose={() => setSettingsTab(null)}
+          onChanged={() => setStatusVersion((v) => v + 1)} />
       )}
       {addHoldingOpen && (
         <PositionDialog

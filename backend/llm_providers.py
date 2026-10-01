@@ -126,11 +126,27 @@ class OpenAICompatibleProvider:
 
 _NO_CREDIT_HINTS = ("insufficient_quota", "insufficient balance", "insufficient credits", "exceeded_current_quota",
                     "exceeded your current quota", "credit balance", "billing")
+# Google says "You exceeded your current quota" for its request limits too, naming the window in the
+# quota id (e.g. GenerateRequestsPerDayPerProjectPerModel-FreeTier). Those are request caps, not an
+# empty balance: per-minute clears within a minute; per-day resets the next day.
+_PER_DAY_HINTS = ("perday", "per_day", "per day")
+_PER_MINUTE_HINTS = ("perminute", "per_minute", "per minute")
+
+
+def _limit_value(text: str) -> str:
+    match = re.search(r"quotavalue'?\"?:\s*'?\"?(\d+)", text) or re.search(r"limit:\s*(\d+)", text)
+    return f" ({match.group(1)} requests)" if match else ""
 
 
 def _openai_error(exc: Exception) -> ProviderError:
     status = getattr(exc, "status_code", None)
     text = f"{getattr(exc, 'code', '') or ''} {exc}".lower()
+    if status == 429 and any(h in text for h in _PER_DAY_HINTS):
+        tier = " free-tier" if "freetier" in text or "free_tier" in text else ""
+        return ProviderError(f"Daily{tier} request limit reached{_limit_value(text)} — resets tomorrow. "
+                             "Enable billing with the provider, or set this model's daily cap below the limit.")
+    if status == 429 and any(h in text for h in _PER_MINUTE_HINTS):
+        return ProviderError("Rate limited by the provider (per-minute limit) — try again shortly.", retryable=True)
     # 402 is DeepSeek's / OpenRouter's "out of balance"; OpenAI and Kimi send a 429 with a quota code.
     if status == 402 or (status in (400, 403, 429) and any(h in text for h in _NO_CREDIT_HINTS)):
         return ProviderError("Out of credit — this account's balance or quota is used up. Top up with the provider.",
@@ -299,6 +315,22 @@ async def fetch_balance(config: ProviderConfig) -> Optional[dict]:
     except (KeyError, TypeError, ValueError, IndexError) as exc:
         raise ProviderError("Unexpected reply from the balance API.") from exc
     return {"amount": round(amount, 2), "currency": currency}
+
+
+# Published list prices, USD per 1M tokens (input, output), used for the spend
+# estimate when a saved model has no prices of its own. Matched by model-id
+# prefix so dated ids (e.g. claude-haiku-4-5-20251001) resolve. Models not
+# listed show tokens only until prices are entered on the model.
+LIST_PRICES: dict[str, tuple[float, float]] = {
+    "claude-opus-5-5": (4.0, 20.0),
+    "claude-sonnet-5-5": (2.0, 10.0),
+    "claude-haiku-4-5": (1.0, 5.0),
+}
+
+
+def list_price(model: str) -> Optional[tuple[float, float]]:
+    model = (model or "").lower()
+    return next((price for prefix, price in LIST_PRICES.items() if model.startswith(prefix)), None)
 
 
 def build_provider(config: ProviderConfig):

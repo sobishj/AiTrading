@@ -29,7 +29,7 @@ from typing import Optional
 import pandas as pd
 from sqlalchemy.orm import Session
 
-from data_provider import yahoo_provider
+from data_provider import completed_daily_bars, reference_price, yahoo_provider
 from market_service import market_service
 from models import AppSettings, Position, PositionAlert, PositionTransaction, Recommendation, Stock, TradeHistory
 from utils.logger import get_logger
@@ -495,7 +495,7 @@ class PositionService:
         graded = 0
         for alert in pending:
             stock = alert.position.stock
-            candles = await market_service.get_candles_for_symbol(stock.symbol, days=40)
+            candles = completed_daily_bars(await market_service.get_candles_for_symbol(stock.symbol, days=40))
             if candles.empty or "date" not in candles.columns:
                 continue
             dates = pd.to_datetime(candles["date"])
@@ -506,7 +506,8 @@ class PositionService:
             if len(after) < GRADE_AFTER_BARS:
                 continue
             window = after.iloc[:GRADE_AFTER_BARS]
-            ret = (float(window["close"].iloc[-1]) / float(alert.price) - 1) * 100
+            price, _ = reference_price(candles, alert_day, float(alert.price))
+            ret = (float(window["close"].iloc[-1]) / price - 1) * 100
             stop = alert.position.stop_loss
             stop_touched = stop is not None and float(window["low"].min()) <= float(stop)
             alert.outcome_return_pct = round(ret, 2)
