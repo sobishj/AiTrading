@@ -70,3 +70,39 @@ def test_inspect_rejects_foreign_newer_or_incomplete_files(tmp_path):
     assert not newer["ok"] and "newer version" in newer["problems"][0]
     partial = inspect(_zip(tmp_path, {"app": "AiTrading", "format_version": 1, "tables": {"stocks": 3}}, []))
     assert not partial["ok"] and "incomplete" in partial["problems"][0]
+
+
+def test_backup_delete_and_housekeeping(tmp_path, monkeypatch):
+    import os
+    import time
+    import backup_service as bs
+
+    monkeypatch.setattr(bs, "BACKUP_DIR", tmp_path)
+    monkeypatch.setattr(bs, "UPLOAD_DIR", tmp_path / "uploads")
+
+    # Delete: only a valid name inside the backups folder.
+    (tmp_path / "aitrading-manual-1.zip").write_bytes(b"x")
+    bs.delete_backup("aitrading-manual-1.zip")
+    assert not (tmp_path / "aitrading-manual-1.zip").exists()
+    for bad in ("../secret.zip", "missing.zip", "notazip.txt"):
+        with pytest.raises(bs.BackupError):
+            bs.delete_backup(bad)
+
+    # Only the newest safety backups are kept; manual ones are never auto-removed.
+    for i in range(5):
+        path = tmp_path / f"aitrading-auto-before-restore-{i}.zip"
+        path.write_bytes(b"x")
+        os.utime(path, (1000 + i, 1000 + i))
+    (tmp_path / "aitrading-manual-2.zip").write_bytes(b"x")
+    bs._prune_safety_backups()
+    left = sorted(p.name for p in tmp_path.glob("*.zip"))
+    assert left == ["aitrading-auto-before-restore-2.zip", "aitrading-auto-before-restore-3.zip",
+                    "aitrading-auto-before-restore-4.zip", "aitrading-manual-2.zip"]
+
+    # Stale uploaded staging copies are dropped when a new one arrives; fresh ones stay.
+    (tmp_path / "uploads").mkdir()
+    stale = tmp_path / "uploads" / "upload-old.zip"
+    stale.write_bytes(b"x")
+    os.utime(stale, (time.time() - 7200, time.time() - 7200))
+    fresh = bs.save_upload(b"y")
+    assert not stale.exists() and fresh.exists()

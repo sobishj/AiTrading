@@ -216,6 +216,15 @@ async def backup_download(name: str):
     return FileResponse(path, media_type="application/zip", filename=path.name)
 
 
+@router.delete("/backup/{name}", status_code=204)
+async def backup_delete(name: str):
+    from backup_service import BackupError, delete_backup
+    try:
+        await asyncio.to_thread(delete_backup, name)
+    except BackupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+
+
 @router.post("/backup/inspect")
 async def backup_inspect(file: UploadFile = File(...)):
     """Upload a backup and see what it contains; nothing is changed until you confirm the restore."""

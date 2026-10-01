@@ -49,6 +49,16 @@ export default function BackupTab({ onRestored }: { onRestored: () => void }) {
     setMessage({ ok: true, text: `Backup made (${entry.rows.toLocaleString("en-IN")} records, ${size(entry.size_bytes)}) and downloaded. Keep it somewhere safe — it contains your trades and holdings.` });
   });
 
+  const remove = (b: BackupEntry) => {
+    if (!window.confirm(`Delete the backup from ${when(b.created_at)} (${size(b.size_bytes)})? This can't be undone.`)) return;
+    run("delete", async () => {
+      await apiService.deleteBackup(b.name);
+      if (report?.name === b.name) setReport(null);
+      await load();
+      setMessage({ ok: true, text: `Backup from ${when(b.created_at)} deleted (${size(b.size_bytes)} freed).` });
+    });
+  };
+
   const upload = (file: File) => run("inspect", async () => setReport(await apiService.inspectBackupFile(file)));
 
   const restore = () => {
@@ -113,7 +123,7 @@ export default function BackupTab({ onRestored }: { onRestored: () => void }) {
       <section className="space-y-2">
         <h4 className="text-xs uppercase tracking-widest text-slate-400">
           Backups on this PC
-          <InfoTip>Kept in the app's backend\backups folder. "Safety" backups are made automatically before every restore.</InfoTip>
+          <InfoTip>Kept in the app's backend\backups folder. "Safety" backups are made automatically before every restore; only the newest 3 are kept. Downloaded copies are separate — deleting one doesn't remove the other.</InfoTip>
         </h4>
         {list.length === 0 && <p className="text-xs text-slate-500">None yet.</p>}
         {list.map((b) => (
@@ -128,6 +138,10 @@ export default function BackupTab({ onRestored }: { onRestored: () => void }) {
             <button disabled={busy !== null} className="text-slate-400 hover:text-slate-200 disabled:opacity-50"
               onClick={() => run("inspect", async () => setReport(await apiService.inspectSavedBackup(b.name)))}>
               Restore…
+            </button>
+            <button disabled={busy !== null} onClick={() => remove(b)}
+              className="text-slate-500 hover:text-neon-rose disabled:opacity-50" title="Delete this backup file">
+              Delete
             </button>
           </div>
         ))}

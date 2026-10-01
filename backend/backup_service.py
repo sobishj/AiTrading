@@ -38,6 +38,9 @@ FORMAT_VERSION = 1
 BACKUP_DIR = Path(__file__).resolve().parent / "backups"
 UPLOAD_DIR = BACKUP_DIR / "uploads"
 CHUNK = 1000
+# Housekeeping, so backups don't quietly fill the disk:
+KEEP_SAFETY_BACKUPS = 3          # newest automatic "before restore" backups kept; older ones are removed
+UPLOAD_MAX_AGE_SECONDS = 3600    # an uploaded file waiting for "Replace…" is dropped after an hour
 MAX_LINE = 20_000_000
 _NAME_RE = re.compile(r"^[A-Za-z0-9_.\-]+\.zip$")
 
@@ -149,7 +152,38 @@ def backup_path(name: str) -> Path:
     raise BackupError("backup not found")
 
 
+def delete_backup(name: str) -> None:
+    """Delete one backup listed under "Backups on this PC" (only files in the backups folder)."""
+    if not _NAME_RE.match(name or ""):
+        raise BackupError("invalid backup name")
+    path = BACKUP_DIR / name
+    if not path.is_file():
+        raise BackupError("backup not found")
+    path.unlink()
+    logger.info("Backup deleted: %s", name)
+
+
+def _prune_uploads(keep: Optional[Path] = None) -> None:
+    """Uploaded files are only a staging copy for inspect -> restore; drop stale ones."""
+    if not UPLOAD_DIR.exists():
+        return
+    now = datetime.now().timestamp()
+    for path in UPLOAD_DIR.glob("*.zip"):
+        if path != keep and now - path.stat().st_mtime > UPLOAD_MAX_AGE_SECONDS:
+            path.unlink(missing_ok=True)
+
+
+def _prune_safety_backups() -> None:
+    if not BACKUP_DIR.exists():
+        return
+    safety = sorted(BACKUP_DIR.glob("aitrading-auto-*.zip"), key=lambda p: p.stat().st_mtime, reverse=True)
+    for path in safety[KEEP_SAFETY_BACKUPS:]:
+        path.unlink(missing_ok=True)
+        logger.info("Removed old safety backup %s (keeping the newest %d)", path.name, KEEP_SAFETY_BACKUPS)
+
+
 def save_upload(data: bytes) -> Path:
+    _prune_uploads()
     UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
     path = UPLOAD_DIR / f"upload-{uuid.uuid4().hex[:12]}.zip"
     path.write_bytes(data)
@@ -199,6 +233,7 @@ def restore(path: Path) -> dict:
         raise BackupError(" ".join(report["problems"]))
     manifest = read_manifest(path)
     safety = create_backup(kind="auto-before-restore")
+    _prune_safety_backups()
     tables = _tables()
     names = ", ".join(f'"{t.name}"' for t in tables)
     loaded: dict[str, int] = {}
@@ -243,6 +278,8 @@ def restore(path: Path) -> dict:
                               "minutes — nothing was changed.")
         raise BackupError(f"Restore failed and was rolled back — nothing was changed ({exc.__class__.__name__}).")
     _after_restore()
+    if path.parent == UPLOAD_DIR:
+        path.unlink(missing_ok=True)   # restored; the staging copy has done its job
     needs_keys = _profiles_needing_keys()
     logger.info("Restored %d rows from %s (safety backup %s)", sum(loaded.values()), path.name, safety["name"])
     return {"restored_rows": sum(loaded.values()), "safety_backup": safety["name"], "models_needing_keys": needs_keys}

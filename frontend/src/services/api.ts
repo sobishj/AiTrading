@@ -439,6 +439,10 @@ class ApiService {
     return data;
   }
 
+  async deleteBackup(name: string): Promise<void> {
+    await this.client.delete(`/backup/${encodeURIComponent(name)}`);
+  }
+
   backupDownloadUrl(name: string): string {
     return `${this.client.defaults.baseURL}/backup/download/${encodeURIComponent(name)}`;
   }
