@@ -204,8 +204,9 @@ def trade_outcome(entry: float, bars: pd.DataFrame, target: Optional[float], sto
     assumed first (conservative). Unknowns stay None.
     """
     highs, lows = bars["high"].astype(float), bars["low"].astype(float)
-    out = {"max_favorable_pct": round((highs.max() / entry - 1) * 100, 2),
-           "max_adverse_pct": round((lows.min() / entry - 1) * 100, 2),
+    # float(): numpy scalars can't be written to the database (psycopg2 renders them as "np.float64(..)").
+    out = {"max_favorable_pct": round(float(highs.max()) / entry * 100 - 100, 2),
+           "max_adverse_pct": round(float(lows.min()) / entry * 100 - 100, 2),
            "target_hit": None, "stop_hit": None, "pnl_pct": None}
     rec = (recommendation or "").upper()
     close = float(bars.iloc[-1]["close"])

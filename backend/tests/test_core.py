@@ -370,3 +370,12 @@ def test_chat_day_bounds_are_ist_midnight_in_utc():
     # 1 Oct 00:00 IST = 30 Sep 18:30 UTC; a chat at 23:59 IST on 1 Oct (18:29 UTC on 1 Oct) is still that day.
     assert start == datetime(2026, 9, 30, 18, 30) and end == datetime(2026, 10, 1, 18, 30)
     assert start <= datetime(2026, 10, 1, 18, 29) < end
+
+
+def test_trade_outcome_returns_plain_floats_for_the_database():
+    from ai_analyst_service import trade_outcome
+    bars = pd.DataFrame({"high": np.array([101.0, 104.0]), "low": np.array([97.0, 99.0]), "close": [100.0, 103.0]})
+    out = trade_outcome(100.0, bars, target=110.0, stop=95.0, recommendation="BUY")
+    for key in ("max_favorable_pct", "max_adverse_pct", "pnl_pct"):
+        assert type(out[key]) is float, key
+    assert out["max_favorable_pct"] == 4.0 and out["max_adverse_pct"] == -3.0
