@@ -1,4 +1,5 @@
 import { FormEvent, ReactNode, useEffect, useMemo, useRef, useState } from "react";
+import apiService from "../../services/api";
 import type { ListMode, Stock } from "../../services/types";
 import DiscoveryBar from "./DiscoveryBar";
 import StockListItem from "./StockListItem";
@@ -75,18 +76,42 @@ export default function StockList({
     return stocks.filter((s) => s.symbol.toUpperCase().includes(q) || s.name.toUpperCase().includes(q));
   }, [stocks, q]);
 
-  // Manual mode: shares matching the search that aren't on the list yet.
+  // Manual mode: every NSE share, ETF and index matching the search (by name or symbol) that isn't on the
+  // list yet — from NSE's own lists on the server; the shares the app already knows are the offline fallback.
+  const [found, setFound] = useState<{ symbol: string; label: string; tag?: string }[] | null>(null);
+  const [searchNote, setSearchNote] = useState<string | null>(null);
+  useEffect(() => {
+    setFound(null);
+    setSearchNote(null);
+    if (mode !== "manual" || q.length < 2) return;
+    const timer = window.setTimeout(() => {
+      apiService.searchInstruments(query.trim())
+        .then((r) => {
+          setFound(r.results.map((i) => ({
+            symbol: i.symbol,
+            label: `${i.name} (${i.symbol})`,
+            tag: i.type === "index" ? (i.has_options ? "Index · F&O" : "Index") : i.type === "etf" ? "ETF"
+              : i.has_options ? "F&O" : undefined,
+          })));
+          setSearchNote(r.note);
+        })
+        .catch(() => setFound(null));
+    }, 250);
+    return () => window.clearTimeout(timer);
+  }, [mode, q]);
+
   const addSuggestions = useMemo(() => {
     if (mode !== "manual" || !q) return [];
     const inList = new Set(stocks.map((s) => s.symbol));
+    if (found) return found.filter((s) => !inList.has(s.symbol)).slice(0, 8);
     const byName = knownStocks
       .filter((s) => !inList.has(s.symbol) && (s.symbol.includes(q) || s.name.toUpperCase().includes(q)))
       .slice(0, 5)
-      .map((s) => ({ symbol: s.symbol, label: s.name }));
+      .map((s) => ({ symbol: s.symbol, label: s.name, tag: undefined as string | undefined }));
     const exact = byName.some((s) => s.symbol === q) || inList.has(q);
-    if (!exact && SYMBOL_RE.test(q)) byName.push({ symbol: q, label: `${q} (NSE symbol)` });
+    if (!exact && SYMBOL_RE.test(q)) byName.push({ symbol: q, label: `${q} (NSE symbol)`, tag: undefined });
     return byName;
-  }, [mode, q, stocks, knownStocks]);
+  }, [mode, q, stocks, knownStocks, found]);
 
   const add = async (symbol: string) => {
     setAdding(symbol);
@@ -165,10 +190,12 @@ export default function StockList({
                 className="w-full text-left px-2 py-1 rounded-md text-xs text-neon-blue hover:bg-white/5 disabled:opacity-50 truncate"
               >
                 {adding === s.symbol ? `Adding ${s.label}…` : `+ Add ${s.label}`}
+                {s.tag && <span className="ml-1.5 text-[9px] px-1 py-px rounded bg-white/5 text-slate-400">{s.tag}</span>}
               </button>
             ))}
           </div>
         )}
+        {mode === "manual" && searchNote && <p className="text-[11px] text-amber-300 leading-snug">{searchNote}</p>}
         {actionError && <p className="text-[11px] text-neon-rose">{actionError}</p>}
       </div>
 

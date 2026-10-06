@@ -92,6 +92,8 @@ MIN_BAR_PROGRESS_FOR_NEW_PICKS = 0.16
 
 # List order: actionable ideas first (see rerank_watchlist).
 ACTION_ORDER = {"BUY": 0, "WAIT": 1, "AVOID": 2}
+# What a plan is traded through, when it isn't a cash share.
+INSTRUMENT_LABELS = {"index": "Index — trade via futures, options or an index ETF", "etf": "ETF (NSE)"}
 
 # Bumped when the pick logic changes, so a morning brief written by older logic
 # is regenerated instead of showing a pick the current engine wouldn't make.
@@ -124,6 +126,7 @@ class RankedStock:
     tags: list[str] = field(default_factory=list)
     # Official NSE facts (nse_service.exchange_facts): results date, F&O ban, delivery, deals, filings.
     exchange: dict = field(default_factory=dict)
+    instrument_type: str = "equity"          # equity | etf | index — what a trade plan is traded through
 
     @property
     def action(self) -> str:
@@ -272,6 +275,7 @@ class RankingService:
             stock_id=stock.id, symbol=stock.symbol, name=stock.name, sector=stock.sector,
             conviction_score=base, base_score=base, technical=technical,
             sentiment=sentiment, volume_score=volume_component, exchange=nse_service.exchange_facts(stock.symbol),
+            instrument_type=stock.instrument_type or "equity",
         )
         self._apply_strategy_and_evidence(item, context)
         return item
@@ -332,6 +336,8 @@ class RankingService:
         item.conviction_score = round(_clamp(item.base_score + sum(adjustments.values()), 0.0, 100.0), 2)
         item.plan = analysis_service.build_trade_plan(t, strategy, item.conviction_score, context.market_regime,
                                                       context.market_uptrend)
+        if item.plan is not None and item.instrument_type in INSTRUMENT_LABELS:
+            item.plan.instrument = INSTRUMENT_LABELS[item.instrument_type]
 
     @staticmethod
     def _apply_exchange_facts(item: RankedStock, adjustments: dict) -> None:

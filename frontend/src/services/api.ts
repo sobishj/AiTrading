@@ -12,6 +12,8 @@ import type {
   ModelCredit,
   ModelSpend,
   DiscoveryStatus,
+  InstrumentSearch,
+  OptionChain,
   ModelCostStats,
   DataSourceRow,
   FeedTest,
@@ -485,6 +487,17 @@ class ApiService {
 
   async restoreBackup(name: string): Promise<{ restored_rows: number; safety_backup: string; models_needing_keys: string[] }> {
     const { data } = await this.client.post("/backup/restore", { name }, { timeout: 600000 });
+    return data;
+  }
+
+  async searchInstruments(q: string): Promise<InstrumentSearch> {
+    const { data } = await this.client.get<InstrumentSearch>("/instruments/search", { params: { q } });
+    return data;
+  }
+
+  async getOptionChain(symbol: string, expiry?: string): Promise<OptionChain> {
+    const { data } = await this.client.get<OptionChain>(`/options/${encodeURIComponent(symbol)}`,
+      { params: expiry ? { expiry } : {}, timeout: 45000 });
     return data;
   }
 

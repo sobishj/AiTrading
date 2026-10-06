@@ -10,7 +10,9 @@ Prices are delayed by up to ~15 minutes, which is fine for the swing-trade
 horizon the ranking engine targets.
 """
 import asyncio
+import contextvars
 import time
+from contextlib import contextmanager
 from datetime import date, datetime, time as dtime, timedelta
 from typing import Optional
 from zoneinfo import ZoneInfo
@@ -38,7 +40,20 @@ _INTERVALS: dict[str, tuple[str, int]] = {
 }
 
 _CACHE_TTL_SECONDS = 60
-_MAX_CONCURRENT_REQUESTS = 8
+_MAX_CONCURRENT_REQUESTS = 8          # what you look at: charts, quotes, your lists
+_MAX_BULK_REQUESTS = 6                # research sweeps (daily pick, factor study) — a separate lane
+# Set while a research sweep fetches hundreds of histories, so a chart you open never queues behind it.
+_bulk = contextvars.ContextVar("aitrading_bulk_requests", default=False)
+
+
+@contextmanager
+def bulk_requests():
+    """Fetches made inside this block (and tasks it starts) use the research lane, not the interactive one."""
+    token = _bulk.set(True)
+    try:
+        yield
+    finally:
+        _bulk.reset(token)
 _HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -157,6 +172,10 @@ def to_yahoo_symbol(symbol: str) -> str:
     symbol = symbol.strip().upper()
     if symbol.startswith("^") or "=" in symbol or "." in symbol:
         return symbol
+    from instruments_service import INDEX_BY_SYMBOL   # local import: instruments_service is a leaf module
+    index = INDEX_BY_SYMBOL.get(symbol)
+    if index is not None and index.yahoo:
+        return index.yahoo
     return f"{symbol}.NS"
 
 
@@ -164,6 +183,7 @@ class YahooProvider:
     def __init__(self) -> None:
         self._client: Optional[httpx.AsyncClient] = None
         self._semaphore: Optional[asyncio.Semaphore] = None
+        self._bulk_semaphore: Optional[asyncio.Semaphore] = None
         self._cache: dict[tuple, tuple[float, pd.DataFrame, dict]] = {}
 
     def _get_client(self) -> httpx.AsyncClient:
@@ -172,6 +192,7 @@ class YahooProvider:
         if self._client is None or self._client.is_closed:
             self._client = httpx.AsyncClient(headers=_HEADERS, timeout=15.0, follow_redirects=True)
             self._semaphore = asyncio.Semaphore(_MAX_CONCURRENT_REQUESTS)
+            self._bulk_semaphore = asyncio.Semaphore(_MAX_BULK_REQUESTS)
         return self._client
 
     async def close(self) -> None:
@@ -204,7 +225,8 @@ class YahooProvider:
         url = f"{settings.YAHOO_CHART_URL}/{to_yahoo_symbol(symbol)}"
 
         try:
-            async with self._semaphore:
+            lane = self._bulk_semaphore if _bulk.get() else self._semaphore
+            async with lane:
                 response = await client.get(url, params=params)
             if response.status_code != 200:
                 logger.warning("Yahoo chart %s (%s) returned HTTP %s", symbol, yahoo_interval, response.status_code)

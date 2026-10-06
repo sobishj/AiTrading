@@ -306,9 +306,10 @@ class NSEService:
         incomplete = {d for (d,) in db.query(NSEDaily.trade_date).filter(NSEDaily.open.is_(None),
                                                                          NSEDaily.series == "EQ").distinct()}
         if incomplete:
-            db.query(NSEDaily).filter(NSEDaily.trade_date.in_(incomplete)).delete(synchronize_session=False)
+            db.query(NSEDaily).filter(NSEDaily.trade_date.in_(incomplete),
+                                      NSEDaily.series != "IDX").delete(synchronize_session=False)
             db.commit()
-        have = {d for (d,) in db.query(NSEDaily.trade_date).distinct()}
+        have = {d for (d,) in db.query(NSEDaily.trade_date).filter(NSEDaily.series != "IDX").distinct()}
         today = datetime.now(IST).date()
         added, sessions, day = 0, 0, today
         async with httpx.AsyncClient(headers=_HEADERS, timeout=30, follow_redirects=True) as client:
@@ -348,12 +349,12 @@ class NSEService:
 
         if self._switched_off("bhavcopy"):
             return
-        dates = [d for (d,) in db.query(NSEDaily.trade_date).distinct().order_by(NSEDaily.trade_date.desc())
-                 .limit(BHAV_SESSIONS)]
+        dates = [d for (d,) in db.query(NSEDaily.trade_date).filter(NSEDaily.series != "IDX").distinct()
+                 .order_by(NSEDaily.trade_date.desc()).limit(BHAV_SESSIONS)]
         if not dates:
             return
         rows: dict[str, list[dict]] = defaultdict(list)
-        for r in (db.query(NSEDaily).filter(NSEDaily.trade_date.in_(dates))
+        for r in (db.query(NSEDaily).filter(NSEDaily.trade_date.in_(dates), NSEDaily.series != "IDX")
                   .order_by(NSEDaily.symbol, NSEDaily.trade_date.desc())):
             rows[r.symbol].append({"trade_date": r.trade_date, "close": float(r.close),
                                    "open": float(r.open) if r.open is not None else None,
@@ -381,7 +382,7 @@ class NSEService:
         if self._switched_off("bhavcopy"):
             return {"downloaded": 0, "off": True}
         known = {s for (s,) in db.query(Stock.symbol)}
-        have = {d for (d,) in db.query(NSEDaily.trade_date).distinct()}
+        have = {d for (d,) in db.query(NSEDaily.trade_date).filter(NSEDaily.series != "IDX").distinct()}
         today = datetime.now(IST).date()
         added, day = 0, today - timedelta(days=1)
         async with httpx.AsyncClient(headers=_HEADERS, timeout=30, follow_redirects=True) as client:

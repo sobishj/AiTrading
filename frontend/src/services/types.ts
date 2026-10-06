@@ -23,6 +23,8 @@ export interface Stock {
   change_reason: string | null;
   in_auto_list: boolean;
   in_manual_list: boolean;
+  /** Futures & options trade on NSE for this underlying (index or F&O stock). */
+  has_options?: boolean;
   /** Position within the requested list (1 = strongest). */
   list_rank: number | null;
 }
@@ -455,6 +457,45 @@ export type WsMessage =
   | WsLearningUpdateMessage
   | WsAIUpdateMessage
   | WsAIOutlookMessage;
+
+/** One NSE share, ETF or index from GET /instruments/search. */
+export interface Instrument {
+  symbol: string;
+  name: string;
+  type: "equity" | "etf" | "index";
+  has_options: boolean;
+  lot_size: number | null;
+}
+
+export interface InstrumentSearch {
+  results: Instrument[];
+  /** Why nothing (or something unexpected) matched, e.g. "NSE isn't a listed company". */
+  note: string | null;
+}
+
+export interface OptionRow {
+  strike: number;
+  ce_ltp: number | null; ce_change: number | null; ce_oi: number | null; ce_oi_change: number | null;
+  ce_iv: number | null; ce_volume: number | null;
+  pe_ltp: number | null; pe_change: number | null; pe_oi: number | null; pe_oi_change: number | null;
+  pe_iv: number | null; pe_volume: number | null;
+}
+
+/** NSE's option chain for one expiry (GET /options/{symbol}). */
+export interface OptionChain {
+  available: boolean;
+  symbol: string;
+  error?: string;
+  expiry?: string;
+  expiries?: string[];
+  underlying?: number;
+  as_of?: string;
+  lot_size?: number | null;
+  summary?: { pcr: number | null; max_pain: number | null; atm_strike: number | null; atm_iv: number | null;
+    support: number | null; resistance: number | null; total_ce_oi: number; total_pe_oi: number };
+  rows?: OptionRow[];
+  strikes_total?: number;
+}
 
 export interface Candle {
   time: string | number;

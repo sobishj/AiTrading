@@ -181,7 +181,13 @@ def _stock_response(stock: Stock, r: Optional[RankedStock], list_rank: Optional[
         in_auto_list=stock.watchlist_status == "active",
         in_manual_list=bool(stock.in_manual_list),
         list_rank=list_rank,
+        has_options=_has_options(stock.symbol),
     )
+
+
+def _has_options(symbol: str) -> bool:
+    from instruments_service import instruments_service
+    return instruments_service.has_options(symbol)
 
 
 @router.get("/stocks", response_model=list[StockResponse])
@@ -216,15 +222,27 @@ async def add_to_manual_list(payload: AddStockRequest, db: Session = Depends(get
     data first). It is ranked immediately, so its chart, trade plan and
     analysis are available as soon as this returns.
     """
+    from instruments_service import instruments_service
+
     symbol = validate_symbol(payload.symbol)
+    await instruments_service.ensure_loaded()
+    info = instruments_service.lookup(symbol)
     stock = db.query(Stock).filter(Stock.symbol == symbol).first()
     if stock is None:
-        meta = await market_service.validate_symbol_exists(symbol)
-        if meta is None:
-            raise HTTPException(status_code=404, detail=f"No NSE market data found for {symbol}")
-        name = payload.name or _display_name(meta, symbol)
-        stock = Stock(symbol=symbol, name=name, sector=payload.sector, instrument_type="equity",
-                      watchlist_status="inactive", keywords=",".join(sorted({name, symbol})))
+        if info is None:
+            hint = instruments_service.search(symbol)
+            names = ", ".join(f"{r['name']} ({r['symbol']})" for r in hint["results"][:3])
+            raise HTTPException(status_code=404, detail=hint["note"] or (
+                f"{symbol} isn't listed on NSE." + (f" Did you mean {names}?" if names else "")))
+        # It's listed — make sure prices actually load before adding it (no empty charts or analyses).
+        candles = await market_service.get_candles_for_symbol(symbol, days=30)
+        if candles is None or candles.empty:
+            raise HTTPException(status_code=502, detail=f"{info['name']} is listed, but no price data could be "
+                                                        "loaded right now. Try again in a minute.")
+        name = payload.name or info["name"]
+        stock = Stock(symbol=symbol, name=name, sector=payload.sector, instrument_type=info["type"],
+                      watchlist_status="inactive",
+                      keywords=",".join(sorted({name, symbol})) if info["type"] == "equity" else None)
         db.add(stock)
     elif stock.name == stock.symbol:
         # Placeholder rows (e.g. created by a tradebook import) get a real name.
@@ -305,6 +323,23 @@ async def remove_stock(symbol: str, background: BackgroundTasks, db: Session = D
             await refresh_and_broadcast(bg_db, trigger=f"{stock.symbol} removed from watchlist")
 
     background.add_task(rerank)
+
+
+@router.get("/instruments/search")
+async def search_instruments(q: str):
+    """Any NSE share, ETF or index by name or symbol (e.g. "hdfc" -> HDFC Bank, HDFC Life, HDFC AMC)."""
+    from instruments_service import instruments_service
+    await instruments_service.ensure_loaded()
+    return instruments_service.search(q[:60])
+
+
+@router.get("/options/{symbol}")
+async def option_chain(symbol: str, expiry: Optional[str] = None):
+    """NSE's option chain for an index or F&O stock (one expiry), with PCR, max pain, ATM IV, OI support/resistance."""
+    from instruments_service import instruments_service
+    from options_service import options_service
+    await instruments_service.ensure_loaded()
+    return await options_service.chain(validate_symbol(symbol), expiry)
 
 
 @router.get("/universe/status")

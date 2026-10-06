@@ -32,6 +32,8 @@ class StockResponse(BaseModel):
     change_reason: Optional[str] = None
     in_auto_list: bool = False
     in_manual_list: bool = False
+    # Futures & options trade on NSE for this underlying (an index such as NIFTY, or an F&O stock).
+    has_options: bool = False
     # Position within the list that was requested (1 = strongest in that list).
     list_rank: Optional[int] = None
 

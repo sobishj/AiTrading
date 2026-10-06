@@ -216,6 +216,10 @@ class MarketService:
         Candles from Kite when connected, else Yahoo; Kite failures fall back to Yahoo. Daily bars get
         any recent session the feed skipped filled in from NSE's official end-of-day file.
         """
+        from instruments_service import INDEX_BY_SYMBOL   # local import: leaf module
+        index = INDEX_BY_SYMBOL.get(symbol.upper())
+        if index is not None:
+            return await self._index_candles(index, days, interval)
         candles = None
         if self.data_source == "kite":
             token = self._resolve_instrument_token(symbol)
@@ -233,6 +237,32 @@ class MarketService:
             from nse_service import nse_service  # local import: nse_service imports this module lazily
             candles = nse_service.fill_missing_sessions(symbol, candles)
         return candles
+
+    async def _index_candles(self, index, days: int, interval: str) -> pd.DataFrame:
+        """
+        An index: Yahoo when it has the full record (it also has intraday bars); for daily bars, NSE's official
+        all-indices history fills in when Yahoo's is short — and is the only source for indices Yahoo lacks.
+        """
+        from database import db_session
+        from instruments_service import instruments_service
+
+        yahoo = (await yahoo_provider.get_candles(index.yahoo, days=days, interval=interval)
+                 if index.yahoo else empty_candles())
+        if interval != "day":
+            return yahoo
+        expected = days * 0.6           # trading sessions in `days` calendar days, roughly, with holidays
+        if len(yahoo) >= min(expected, 200):
+            return yahoo
+        with db_session() as db:
+            official = instruments_service.index_candles(db, index.symbol, days)
+        if official.empty:
+            return yahoo
+        if not yahoo.empty:
+            # Today's live bar comes from Yahoo when it has one; NSE's file covers completed sessions.
+            last_official = pd.Timestamp(official["date"].iloc[-1]).date()
+            live = yahoo[pd.to_datetime(yahoo["date"]).dt.tz_convert("Asia/Kolkata").dt.date > last_official]
+            official = pd.concat([official, live], ignore_index=True)
+        return official.reset_index(drop=True)
 
     async def validate_symbol_exists(self, symbol: str) -> Optional[dict]:
         """Confirm an NSE symbol has market data; returns Yahoo meta (incl. longName) or None."""

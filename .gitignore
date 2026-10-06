@@ -45,3 +45,4 @@ credentials*.json
 backend/backups/
 backend/.stop-background
 backend/.runner.pid
+backend/cache/

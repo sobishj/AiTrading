@@ -318,6 +318,9 @@ async def _news_watch_loop() -> None:
                 bhav_checked = time.monotonic()
                 with db_session() as db:
                     await nse_service.ensure_bhavcopy(db)
+                    from instruments_service import instruments_service
+                    await instruments_service.ensure_loaded()              # NSE share/ETF/F&O lists (weekly)
+                    await instruments_service.backfill_index_history(db)   # official index history (daily)
             with db_session() as db:
                 stocks = db.query(Stock).filter(tracked_stock_filter()).all()
                 filings = [(stock, f) for stock in stocks for f in nse_service.filings_for(stock.symbol)]

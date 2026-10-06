@@ -306,8 +306,10 @@ class DiscoveryService:
         stocks = self.pool(db)
         context = await ranking_service._build_context(db)
 
-        candles = await asyncio.gather(*(market_service.get_candles_for_symbol(s.symbol, days=settings.HISTORY_DAYS)
-                                         for s in stocks), return_exceptions=True)
+        from data_provider import bulk_requests
+        with bulk_requests():           # its own lane: charts you open aren't stuck behind ~500 downloads
+            candles = await asyncio.gather(*(market_service.get_candles_for_symbol(s.symbol, days=settings.HISTORY_DAYS)
+                                             for s in stocks), return_exceptions=True)
         today = today_ist()
         filtered: dict[str, int] = {}
         eligible_pairs = []

@@ -4,6 +4,7 @@ import type { Theme } from "../../hooks/useTheme";
 import apiService from "../../services/api";
 import CandlestickChart, { ChartNavigation, Drawing, IndicatorToggles } from "./CandlestickChart";
 import DrawingTools, { DrawingTool } from "./DrawingTools";
+import OptionChainModal from "./OptionChainModal";
 import TimeframeSelector, { RANGE_PRESETS, TIMEFRAMES, Timeframe } from "./TimeframeSelector";
 
 interface TradingViewChartProps {
@@ -12,6 +13,17 @@ interface TradingViewChartProps {
   /** Bumped by the parent on live ranking updates so levels and the last bar refresh. */
   refreshKey: number;
   theme: Theme;
+  /** Show the Option chain button (index or F&O stock). */
+  hasOptions?: boolean;
+}
+
+/** "5 Oct" when the newest bar isn't from today (daily data after the session, an index with no live feed). */
+function lastBarDay(time: string | number): string | null {
+  const when = typeof time === "number" ? new Date(time * 1000) : new Date(time);
+  if (isNaN(when.getTime())) return null;
+  const today = new Date();
+  if (when.toDateString() === today.toDateString()) return null;
+  return when.toLocaleDateString("en-IN", { day: "numeric", month: "short" });
 }
 
 const DEFAULT_TOGGLES: IndicatorToggles = { ema: true, volume: true, rsi: true, macd: true, levels: true };
@@ -44,7 +56,8 @@ function saveDrawings(symbol: string, timeframe: Timeframe, drawings: Drawing[])
 }
 
 /** PRD §7 center chart: candles, timeframes, drawing tools, S/R and trade-plan levels, EMA/RSI/MACD/volume. */
-export default function TradingViewChart({ symbol, name, refreshKey, theme }: TradingViewChartProps) {
+export default function TradingViewChart({ symbol, name, refreshKey, theme, hasOptions = false }: TradingViewChartProps) {
+  const [optionsOpen, setOptionsOpen] = useState(false);
   const [timeframe, setTimeframe] = useState<Timeframe>("1d");
   const [drawingTool, setDrawingTool] = useState<DrawingTool>("none");
   const [toggles, setToggles] = useState<IndicatorToggles>(DEFAULT_TOGGLES);
@@ -100,6 +113,18 @@ export default function TradingViewChart({ symbol, name, refreshKey, theme }: Tr
         <div className="flex items-baseline gap-2 min-w-0">
           <span className="font-semibold text-sm truncate">{name ?? symbol}</span>
           <span className="text-[11px] text-slate-500 font-mono">NSE:{symbol}</span>
+          {hasOptions && symbol && (
+            <button onClick={() => setOptionsOpen(true)}
+              className="text-[11px] px-2 py-0.5 rounded-md border border-neon-blue/40 text-neon-blue hover:bg-neon-blue/10"
+              title="NSE's option chain: premiums, open interest, IV, PCR, max pain">
+              Option chain
+            </button>
+          )}
+          {last && lastBarDay(last.time) && (
+            <span className="text-[10px] text-amber-300" title="The newest price bar is from this date — not live">
+              as of {lastBarDay(last.time)}
+            </span>
+          )}
           {last && (
             <span className="text-sm font-mono text-slate-200">
               ₹{last.close.toLocaleString("en-IN", { maximumFractionDigits: 2 })}
@@ -217,6 +242,7 @@ export default function TradingViewChart({ symbol, name, refreshKey, theme }: Tr
           </div>
         </div>
       )}
+      {optionsOpen && symbol && <OptionChainModal symbol={symbol} name={name} onClose={() => setOptionsOpen(false)} />}
     </div>
   );
 }

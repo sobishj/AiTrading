@@ -78,6 +78,7 @@ while (-not (Test-Path $StopFlag)) {
     $started = Get-Date
     $env:AITRADING_RUNNER = "1"
     $env:PYTHONIOENCODING = "utf-8"
+    $env:PYTHONWARNINGS = "ignore::DeprecationWarning"   # library notices flooded the log and hid real errors
     if ((Test-Path $Log) -and (Get-Item $Log).Length -gt 20MB) { Move-Item $Log "$Log.1" -Force }   # keep it small
     Push-Location $BackendDir
     # cmd's redirection writes the backend's output as-is (UTF-8); PowerShell 5.1's would write UTF-16.

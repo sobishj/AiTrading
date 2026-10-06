@@ -156,9 +156,13 @@ class KnowledgeService:
         stocks = list(pool.values())
         counters: dict = defaultdict(_Counter)
         observations = 0
+        from data_provider import bulk_requests
         for stock in stocks:
             # Only finished sessions: a still-forming bar would count a live price as a 5-day outcome.
-            candles = completed_daily_bars(await market_service.get_candles_for_symbol(stock.symbol, days=HISTORY_DAYS))
+            # The research lane: charts you open aren't stuck behind ~500 history downloads.
+            with bulk_requests():
+                candles = completed_daily_bars(
+                    await market_service.get_candles_for_symbol(stock.symbol, days=HISTORY_DAYS))
             if candles.empty or len(candles) < HISTORY_WARMUP + HORIZON + 10 or "date" not in candles.columns:
                 continue
             df = analysis_service.indicator_frame(candles)

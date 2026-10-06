@@ -270,7 +270,8 @@ export default function App() {
               return pick ? { price: pick.current_price, change_pct: pick.change_pct, rank: pick.rank, action: pick.action } : null;
             })()} />
         }
-        chart={<TradingViewChart symbol={selectedSymbol} name={selected?.name} refreshKey={liveVersion} theme={theme} />}
+        chart={<TradingViewChart symbol={selectedSymbol} name={selected?.name} refreshKey={liveVersion} theme={theme}
+          hasOptions={selected?.has_options} />}
         tradePlan={
           <TradePlanCard symbol={selectedSymbol} refreshKey={liveVersion} position={selectedPosition}
             onPositionChanged={onPositionChanged} onOpenHolding={(p) => setOpenHoldingId(p.id)} />

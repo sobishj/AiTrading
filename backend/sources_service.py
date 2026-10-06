@@ -201,6 +201,8 @@ def evaluate_usefulness(db: Session) -> dict:
                             .filter(NSEDaily.symbol.in_(symbols), NSEDaily.series.in_(("EQ", "BE")))
                             .order_by(NSEDaily.symbol, NSEDaily.trade_date)):
         closes[sym].append((day, float(close)))
+    from data_provider import CORPORATE_ACTION_GAP
+    gap_low, gap_high = CORPORATE_ACTION_GAP
     ist = timezone(timedelta(hours=5, minutes=30))
     tally: dict[str, list[int]] = defaultdict(lambda: [0, 0])
     for read, sym in reads:
@@ -211,6 +213,9 @@ def evaluate_usefulness(db: Session) -> dict:
         base = max((i for i, (d, _) in enumerate(series) if d <= when), default=None)
         if base is None or base + USEFULNESS_HORIZON >= len(series):
             continue                       # too recent (or before the record starts): not judged yet
+        window = [c for _, c in series[base:base + USEFULNESS_HORIZON + 1]]
+        if any(not (gap_low <= b / a <= gap_high) for a, b in zip(window, window[1:])):
+            continue                       # a split/bonus inside the window would read as a crash
         ret = (series[base + USEFULNESS_HORIZON][1] / series[base][1] - 1) * 100
         right = read_was_right(read.impact, ret)
         if right is None:
