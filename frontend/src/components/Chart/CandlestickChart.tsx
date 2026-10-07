@@ -10,7 +10,7 @@ import {
   UTCTimestamp,
   createChart,
 } from "lightweight-charts";
-import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from "react";
+import { forwardRef, useEffect, useImperativeHandle, useMemo, useRef, useState } from "react";
 import type { Theme } from "../../hooks/useTheme";
 import type { ChartData, SeriesPoint } from "../../services/types";
 import type { DrawingTool } from "./DrawingTools";
@@ -39,6 +39,11 @@ export interface ChartNavigation {
   barCount: () => number;
 }
 
+// The price pane is what you read: it always keeps at least this much height. RSI/MACD bands get a fixed,
+// readable height each and are left out (with a note) when the chart is too short to fit them as well.
+const MIN_PRICE_PX = 190;
+const BAND_PX = 64;
+
 interface CandlestickChartProps {
   data: ChartData | null;
   /** Changes when the symbol or timeframe changes; the default view is applied only then, not on live refreshes. */
@@ -51,6 +56,8 @@ interface CandlestickChartProps {
   drawings: Drawing[];
   onAddDrawing: (drawing: Drawing) => void;
   theme: Theme;
+  /** Open the chart full-screen (offered when indicator bands don't fit). */
+  onExpand?: () => void;
 }
 
 const IST_OFFSET_SECONDS = 19800;
@@ -125,13 +132,14 @@ interface Legend {
 const MIN_VISIBLE_BARS = 10;
 
 const CandlestickChart = forwardRef<ChartNavigation, CandlestickChartProps>(function CandlestickChart(
-  { data, viewKey, defaultBars, intraday, show, drawingTool, drawings, onAddDrawing, theme },
+  { data, viewKey, defaultBars, intraday, show, drawingTool, drawings, onAddDrawing, theme, onExpand },
   navRef
 ) {
   const COLORS = PALETTES[theme];
   const barCountRef = useRef(0);
   const appliedViewKey = useRef<string | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
+  const [height, setHeight] = useState(0);
   const chartRef = useRef<IChartApi | null>(null);
   const series = useRef<{
     candle?: ISeriesApi<"Candlestick">;
@@ -258,6 +266,7 @@ const CandlestickChart = forwardRef<ChartNavigation, CandlestickChartProps>(func
 
     const observer = new ResizeObserver(() => {
       chart.applyOptions({ width: container.clientWidth, height: container.clientHeight });
+      setHeight(container.clientHeight);
     });
     observer.observe(container);
     appliedViewKey.current = null; // a new chart instance needs its default view again
@@ -331,35 +340,49 @@ const CandlestickChart = forwardRef<ChartNavigation, CandlestickChartProps>(func
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [theme]);
 
-  // Pane layout: price on top, then volume, RSI and MACD bands at the bottom.
+  // Which bands fit: MACD is dropped first, then RSI, until the price pane keeps MIN_PRICE_PX.
+  const fit = useMemo(() => {
+    let rsi = show.rsi;
+    let macd = show.macd;
+    const count = () => Number(rsi) + Number(macd);
+    if (height > 0) {
+      if (macd && height - count() * BAND_PX < MIN_PRICE_PX) macd = false;
+      if (rsi && height - count() * BAND_PX < MIN_PRICE_PX) rsi = false;
+    }
+    return { rsi, macd, hidden: [show.rsi && !rsi && "RSI", show.macd && !macd && "MACD"].filter(Boolean) as string[] };
+  }, [show.rsi, show.macd, height]);
+
+  // Pane layout: price on top with volume along its bottom edge (as on TradingView), then RSI and MACD bands.
   useEffect(() => {
     const chart = chartRef.current;
     const s = series.current;
     if (!chart) return;
-    const bands = [show.rsi, show.macd].filter(Boolean).length;
-    const bandHeight = 0.16;
-    const priceBottom = 0.06 + bands * bandHeight + (show.volume ? 0.1 : 0);
-    chart.priceScale("right").applyOptions({ scaleMargins: { top: 0.06, bottom: priceBottom } });
-    const volumeTop = 1 - bands * bandHeight - 0.14;
-    chart.priceScale("volume").applyOptions({ scaleMargins: { top: volumeTop, bottom: bands * bandHeight + 0.02 } });
+    const bands = Number(fit.rsi) + Number(fit.macd);
+    const bandHeight = height > 0 ? Math.min(0.22, BAND_PX / height) : 0.16;
+    const priceBottom = 0.03 + bands * bandHeight;
+    const priceSpan = 1 - 0.06 - priceBottom;
+    // Candles keep clear of the volume bars, which take the bottom fifth of the price pane.
+    chart.priceScale("right").applyOptions({
+      scaleMargins: { top: 0.06, bottom: priceBottom + (show.volume ? priceSpan * 0.16 : 0) } });
+    chart.priceScale("volume").applyOptions({ scaleMargins: { top: 1 - priceBottom - priceSpan * 0.2, bottom: priceBottom } });
     let bandIndex = 0;
-    if (show.rsi) {
+    if (fit.rsi) {
       const bottom = (bands - 1 - bandIndex) * bandHeight;
       chart.priceScale("rsi").applyOptions({ scaleMargins: { top: 1 - bottom - bandHeight + 0.02, bottom } });
       bandIndex += 1;
     }
-    if (show.macd) {
+    if (fit.macd) {
       const bottom = (bands - 1 - bandIndex) * bandHeight;
       chart.priceScale("macd").applyOptions({ scaleMargins: { top: 1 - bottom - bandHeight + 0.02, bottom } });
     }
     s.volume?.applyOptions({ visible: show.volume });
     s.ema20?.applyOptions({ visible: show.ema });
     s.ema50?.applyOptions({ visible: show.ema });
-    s.rsi?.applyOptions({ visible: show.rsi });
-    s.macd?.applyOptions({ visible: show.macd });
-    s.signal?.applyOptions({ visible: show.macd });
-    s.hist?.applyOptions({ visible: show.macd });
-  }, [show, theme]);
+    s.rsi?.applyOptions({ visible: fit.rsi });
+    s.macd?.applyOptions({ visible: fit.macd });
+    s.signal?.applyOptions({ visible: fit.macd });
+    s.hist?.applyOptions({ visible: fit.macd });
+  }, [show, fit, height, theme]);
 
   // Data.
   useEffect(() => {
@@ -439,6 +462,13 @@ const CandlestickChart = forwardRef<ChartNavigation, CandlestickChartProps>(func
   return (
     <div className="relative w-full h-full">
       <div ref={containerRef} className={`absolute inset-0 ${drawingTool !== "none" ? "cursor-crosshair" : ""}`} />
+      {fit.hidden.length > 0 && (
+        <button type="button" onClick={onExpand}
+          className="absolute bottom-1 left-2 z-10 text-[10px] px-1.5 py-0.5 rounded bg-black/40 text-slate-300 hover:text-neon-blue"
+          title="The chart is too short to show these without squeezing the price. Expand it, or drag the panel taller.">
+          {fit.hidden.join(" & ")} hidden — chart too short{onExpand ? " · Expand ⤢" : ""}
+        </button>
+      )}
       <div className="absolute top-1 left-2 z-10 pointer-events-none text-[11px] font-mono flex gap-3 text-slate-400">
         {legend && (
           <>

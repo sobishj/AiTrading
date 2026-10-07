@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { useResource } from "../../hooks/useResource";
 import type { Theme } from "../../hooks/useTheme";
 import apiService from "../../services/api";
@@ -58,6 +59,14 @@ function saveDrawings(symbol: string, timeframe: Timeframe, drawings: Drawing[])
 /** PRD §7 center chart: candles, timeframes, drawing tools, S/R and trade-plan levels, EMA/RSI/MACD/volume. */
 export default function TradingViewChart({ symbol, name, refreshKey, theme, hasOptions = false }: TradingViewChartProps) {
   const [optionsOpen, setOptionsOpen] = useState(false);
+  // Full-screen chart (every indicator band fits); Esc or the button returns it to its panel.
+  const [expanded, setExpanded] = useState(false);
+  useEffect(() => {
+    if (!expanded) return;
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") setExpanded(false); };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [expanded]);
   const [timeframe, setTimeframe] = useState<Timeframe>("1d");
   const [drawingTool, setDrawingTool] = useState<DrawingTool>("none");
   const [toggles, setToggles] = useState<IndicatorToggles>(DEFAULT_TOGGLES);
@@ -107,8 +116,8 @@ export default function TradingViewChart({ symbol, name, refreshKey, theme, hasO
   const prev = chartData?.candles[chartData.candles.length - 2];
   const change = last && prev ? ((last.close - prev.close) / prev.close) * 100 : null;
 
-  return (
-    <div className="glass-panel h-full flex flex-col overflow-hidden">
+  const panel = (
+    <div className={`glass-panel h-full flex flex-col overflow-hidden ${expanded ? "bg-base-900" : ""}`}>
       <div className="px-4 py-2 border-b border-white/5 flex items-center justify-between flex-wrap gap-2">
         <div className="flex items-baseline gap-2 min-w-0">
           <span className="font-semibold text-sm truncate">{name ?? symbol}</span>
@@ -158,6 +167,11 @@ export default function TradingViewChart({ symbol, name, refreshKey, theme, hasO
             hasDrawings={drawings.length > 0}
           />
           <TimeframeSelector active={timeframe} onChange={setTimeframe} />
+          <button onClick={() => setExpanded((v) => !v)}
+            className="px-2 py-0.5 rounded text-[11px] font-medium text-slate-400 hover:text-neon-blue hover:bg-neon-blue/10"
+            title={expanded ? "Back to the panel (Esc)" : "Open the chart full-screen"}>
+            {expanded ? "✕ Close" : "⤢ Expand"}
+          </button>
         </div>
       </div>
 
@@ -183,6 +197,7 @@ export default function TradingViewChart({ symbol, name, refreshKey, theme, hasO
           drawings={drawings}
           onAddDrawing={addDrawing}
           theme={theme}
+          onExpand={expanded ? undefined : () => setExpanded(true)}
         />
       </div>
       {chartData && chartData.candles.length > 0 && (
@@ -244,5 +259,20 @@ export default function TradingViewChart({ symbol, name, refreshKey, theme, hasO
       )}
       {optionsOpen && symbol && <OptionChainModal symbol={symbol} name={name} onClose={() => setOptionsOpen(false)} />}
     </div>
+  );
+
+  if (!expanded) return panel;
+  return (
+    <>
+      <div className="glass-panel h-full flex items-center justify-center text-xs text-slate-500">
+        Chart open full-screen — press Esc to bring it back
+      </div>
+      {createPortal(
+        <div className="fixed inset-0 z-40 bg-black/70 backdrop-blur-sm p-3" onClick={() => setExpanded(false)}>
+          <div className="h-full" onClick={(e) => e.stopPropagation()}>{panel}</div>
+        </div>,
+        document.body,
+      )}
+    </>
   );
 }

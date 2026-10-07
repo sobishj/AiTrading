@@ -896,10 +896,12 @@ class AIAnalystService:
         )
         text = await llm_service.complete(prompt, temperature=0.2, max_tokens=400)
         if text is None:
+            self.outlook_failed(llm_service.last_error.get("background") or "the AI model gave no reply")
             return None
         parsed = parse_prediction(text.replace("BIAS:", "DIRECTION:").replace("Bias:", "DIRECTION:"))
         if parsed is None:
             logger.warning("Unparseable market outlook: %r", text[:200])
+            self.outlook_failed("the AI reply couldn't be read (no probability given)")
             return None
         summary = next((m.group(1).strip() for m in re.finditer(r"^\W*SUMMARY\W*[:=]\s*(.+)$", text,
                                                                   re.IGNORECASE | re.MULTILINE)), "")
@@ -914,7 +916,18 @@ class AIAnalystService:
         db.commit()
         db.refresh(outlook)
         logger.info("AI market outlook for %s: %s (%.0f%% up)", session, outlook.bias, float(outlook.probability_up))
+        self.outlook_status = {"state": "ok", "reason": None, "at": datetime.now(timezone.utc).isoformat()}
         return outlook
+
+    # Last outlook attempt, so the UI can say why there is no NIFTY probability instead of showing nothing.
+    outlook_status: dict = {"state": "none", "reason": None, "at": None}
+
+    def outlook_queued(self) -> None:
+        self.outlook_status = {"state": "queued", "reason": None, "at": datetime.now(timezone.utc).isoformat()}
+
+    def outlook_failed(self, reason: str) -> None:
+        logger.warning("AI market outlook not made: %s", reason)
+        self.outlook_status = {"state": "failed", "reason": reason, "at": datetime.now(timezone.utc).isoformat()}
 
     def latest_outlook(self, db: Session) -> Optional[AIMarketOutlook]:
         """The newest outlook for the upcoming session, or None: a forecast for a session

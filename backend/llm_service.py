@@ -120,6 +120,8 @@ class LLMService:
         self._providers: dict[tuple, object] = {}
         self._availability: dict[int, tuple[bool, float]] = {}
         self._cap_warned: set[tuple[int, date]] = set()
+        # Why the last call per role returned None (None after a success), so a job can say why it produced nothing.
+        self.last_error: dict[str, Optional[str]] = {}
         # profile id -> {"state": "ok" | "no_credit", "message", "at"}: the credit state the
         # latest real call revealed (for providers with no balance API, the only signal there is).
         self.credit: dict[int, dict] = {}
@@ -248,15 +250,24 @@ class LLMService:
     async def _call(self, role: str, messages: list[dict], max_tokens: int, temperature: float,
                     effort: str) -> Optional[str]:
         profile = self.active(role)
-        if profile is None or not await self.is_available(role) or not self._consume(profile):
+        if profile is None:
+            self.last_error[role] = f"no {role} AI model is set up"
+            return None
+        if not await self.is_available(role):
+            self.last_error[role] = f"{profile.name} is unreachable"
+            return None
+        if not self._consume(profile):
+            self.last_error[role] = f"{profile.name} reached its daily cap in Settings"
             return None
         try:
             reply = await self._provider(profile).chat_ex(messages, max_tokens=max_tokens, temperature=temperature,
                                                           effort=effort)
             self.note_credit(profile.id)
             record_usage(profile.id, bool(reply.text), reply.input_tokens, reply.output_tokens)
+            self.last_error[role] = None if reply.text else f"{profile.name} returned an empty reply"
             return reply.text or None
         except ProviderError as exc:
+            self.last_error[role] = f"{profile.name}: {exc.message}"
             self.note_credit(profile.id, exc)
             record_usage(profile.id, False)
             logger.error("LLM %s call failed (%s): %s", role, profile.name, exc.message)
@@ -324,6 +335,10 @@ class LLMService:
             try:
                 if await self.is_available("background"):
                     await job()
+                else:
+                    profile = self.active("background")
+                    self.last_error["background"] = (f"{profile.name} is unreachable" if profile
+                                                     else "no background AI model is set up")
             except asyncio.CancelledError:
                 raise
             except Exception as exc:  # noqa: BLE001

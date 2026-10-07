@@ -1,6 +1,36 @@
-import { useState } from "react";
-import type { LivePick, MarketOutlook, MorningBrief, TradePlan } from "../../services/types";
+import { useEffect, useState } from "react";
+import apiService from "../../services/api";
+import type { LivePick, MarketOutlook, MorningBrief, OutlookStatus, TradePlan } from "../../services/types";
 import Markdown from "../Chat/Markdown";
+
+/** Why there's no NIFTY outlook yet (polled while it's missing; the backend retries every 30 min). */
+function useOutlookStatus(missing: boolean): [OutlookStatus | null, () => void] {
+  const [status, setStatus] = useState<OutlookStatus | null>(null);
+  const [version, setVersion] = useState(0);
+  useEffect(() => {
+    if (!missing) return;
+    let alive = true;
+    const load = () => apiService.getAIOutlookStatus().then((s) => alive && setStatus(s)).catch(() => {});
+    load();
+    const id = window.setInterval(load, 60_000);
+    return () => {
+      alive = false;
+      window.clearInterval(id);
+    };
+  }, [missing, version]);
+  const retry = () => {
+    apiService.queueAIOutlook().catch(() => {});
+    setStatus({ state: "queued", reason: null, at: new Date().toISOString() });
+    window.setTimeout(() => setVersion((v) => v + 1), 15_000);
+  };
+  return [status, retry];
+}
+
+function outlookMissingText(status: OutlookStatus | null): string {
+  if (!status || status.state === "none") return "Not made yet — the AI writes it at 20:00 and 07:45, or when the app starts.";
+  if (status.state === "queued") return status.reason ? `Being prepared (${status.reason}).` : "Being prepared by the AI…";
+  return `The AI couldn't make it: ${status.reason ?? "unknown error"}. It retries every 30 minutes.`;
+}
 
 interface MorningBriefBarProps {
   brief: MorningBrief | null;
@@ -70,6 +100,7 @@ function OutlookDetails({ outlook }: { outlook: MarketOutlook }) {
 
 export default function MorningBriefBar({ brief, outlook, loading, onSelect, live }: MorningBriefBarProps) {
   const [open, setOpen] = useState(false);
+  const [outlookStatus, retryOutlook] = useOutlookStatus(!outlook);
 
   if (!brief) {
     return (
@@ -82,6 +113,9 @@ export default function MorningBriefBar({ brief, outlook, loading, onSelect, liv
   const plan = brief.best_plan;
   const regimeClass = REGIME_STYLES[brief.regime ?? "neutral"] ?? REGIME_STYLES.neutral;
   const generated = new Date(brief.generated_at + (brief.generated_at.endsWith("Z") ? "" : "Z"));
+  const noPickReason = brief.regime === "risk-off"
+    ? "No pick: NIFTY is below its 50-day EMA, so no new longs today."
+    : "No stock meets the buy criteria today — standing aside is a position too.";
 
   return (
     <>
@@ -118,18 +152,44 @@ export default function MorningBriefBar({ brief, outlook, loading, onSelect, liv
             })()}
           </button>
         ) : (
-          <span className="text-xs text-slate-400 truncate">No stock meets the buy criteria today — standing aside is a position too.</span>
+          <span className="text-xs text-slate-400 truncate min-w-0" title={noPickReason}>
+            {noPickReason}
+            {brief.watchlist_top.length > 0 && (
+              <>
+                {" "}Watching:{" "}
+                {brief.watchlist_top.slice(0, 3).map((w, i) => (
+                  <span key={w.symbol}>
+                    {i > 0 && ", "}
+                    <button onClick={() => onSelect(w.symbol)} className="text-slate-300 hover:text-neon-blue">
+                      {w.name} ({w.conviction.toFixed(0)})
+                    </button>
+                  </span>
+                ))}
+              </>
+            )}
+          </span>
         )}
-        {outlook && (
+        {outlook ? (
           <button
             onClick={() => setOpen(true)}
             title={`AI outlook for ${outlook.session_date}: ${outlook.summary ?? ""}`}
             className={`pill border shrink-0 ml-auto ${BIAS_STYLES[outlook.bias] ?? BIAS_STYLES.flat}`}
           >
-            Next session: {outlook.bias === "up" ? "▲" : outlook.bias === "down" ? "▼" : "▬"} {outlook.probability_up.toFixed(0)}%
+            NIFTY: {outlook.bias === "up" ? "▲" : outlook.bias === "down" ? "▼" : "▬"} {outlook.probability_up.toFixed(0)}% up
+          </button>
+        ) : (
+          <button
+            onClick={() => setOpen(true)}
+            title={outlookMissingText(outlookStatus)}
+            className={`pill border shrink-0 ml-auto ${outlookStatus?.state === "failed" ? "text-amber-300 border-amber-300/30 bg-amber-300/10" : BIAS_STYLES.flat}`}
+          >
+            NIFTY odds: {outlookStatus?.state === "queued" ? "preparing…" : "n/a"}
           </button>
         )}
-        <span className={`pill border shrink-0 ${outlook ? "" : "ml-auto"} ${regimeClass}`}>{brief.regime ?? "neutral"}</span>
+        <span className={`pill border shrink-0 ${regimeClass}`}
+          title={brief.regime === "risk-off" ? "NIFTY is below its 50-day EMA — no new long trades" : undefined}>
+          {brief.regime ?? "neutral"}
+        </span>
         <button onClick={() => setOpen(true)} className="text-xs text-slate-400 hover:text-neon-blue shrink-0">
           Read brief
         </button>
@@ -145,7 +205,17 @@ export default function MorningBriefBar({ brief, outlook, loading, onSelect, liv
               </button>
             </div>
             <p className="text-[11px] text-slate-500">Generated {generated.toLocaleString("en-IN")}</p>
-            {outlook && <OutlookDetails outlook={outlook} />}
+            {outlook ? <OutlookDetails outlook={outlook} /> : (
+              <div className="space-y-1">
+                <h4 className="text-[11px] uppercase tracking-widest text-slate-500">AI NIFTY outlook</h4>
+                <p className="text-sm text-slate-300">
+                  {outlookMissingText(outlookStatus)}{" "}
+                  {outlookStatus?.state !== "queued" && (
+                    <button onClick={retryOutlook} className="text-neon-blue hover:underline">Try now</button>
+                  )}
+                </p>
+              </div>
+            )}
             {brief.ai_brief && (
               <div className="text-sm text-slate-200 leading-relaxed border-l-2 border-neon-purple/40 pl-3">
                 <Markdown text={brief.ai_brief} />

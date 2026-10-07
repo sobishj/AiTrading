@@ -28,6 +28,7 @@ import type {
   ProviderKind,
   AIPerformance,
   MarketOutlook,
+  OutlookStatus,
   AIPredictionRow,
   AppSettings,
   AppStatus,
@@ -235,6 +236,11 @@ class ApiService {
 
   async getAIOutlook(): Promise<MarketOutlook | null> {
     const { data } = await this.client.get<MarketOutlook | null>("/ai/outlook");
+    return data;
+  }
+
+  async getAIOutlookStatus(): Promise<OutlookStatus> {
+    const { data } = await this.client.get<OutlookStatus>("/ai/outlook-status");
     return data;
   }
 

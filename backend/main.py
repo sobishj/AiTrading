@@ -92,9 +92,14 @@ def enqueue_ai_forecasts(force: bool = False) -> None:
     llm_service.enqueue(job, label="ai-forecasts")
 
 
+_last_outlook_attempt: float | None = None   # monotonic time of the last enqueue (the scheduler retries a missing outlook)
+
+
 def enqueue_ai_outlook() -> None:
+    global _last_outlook_attempt
     if not settings.AI_ANALYST_ENABLED:
         return
+    _last_outlook_attempt = time.monotonic()
 
     async def job() -> None:
         with db_session() as db:
@@ -104,7 +109,10 @@ def enqueue_ai_outlook() -> None:
                 await connection_manager.broadcast(
                     {"type": "ai_outlook", **ai_analyst_service.outlook_payload(outlook)})
 
-    llm_service.enqueue(job, label="ai-outlook")
+    if llm_service.enqueue(job, label="ai-outlook"):
+        ai_analyst_service.outlook_queued()
+    else:
+        ai_analyst_service.outlook_failed("the AI job queue is full or not running")
 
 
 def market_is_open(now: datetime | None = None) -> bool:
@@ -373,15 +381,29 @@ def _parse_hhmm(value: str, default: dtime) -> dtime:
         return default
 
 
-def _last_learning_date():
-    """IST date of the last learning cycle (from the database), or None."""
+def _last_learning_date(learn_at: dtime):
+    """The learning day the last cycle (from the database) covered, or None: a run before
+    learn_at covers the previous weekday, so a morning catch-up doesn't skip today's run."""
     try:
         with db_session() as db:
             cfg = ranking_service.get_or_create_settings(db)
             if cfg.last_learning_at:
-                return cfg.last_learning_at.replace(tzinfo=timezone.utc).astimezone(IST).date()
+                return _learning_due_date(cfg.last_learning_at.replace(tzinfo=timezone.utc).astimezone(IST), learn_at)
     except Exception as exc:  # noqa: BLE001
         logger.warning("Last learning time unavailable: %s", exc)
+    return None
+
+
+OUTLOOK_RETRY_SECONDS = 30 * 60
+
+
+def _learning_due_date(now: datetime, learn_at: dtime):
+    """The latest weekday whose learning time has passed (today after learn_at, else an earlier weekday)."""
+    day = now.date() if now.time() >= learn_at else now.date() - timedelta(days=1)
+    for _ in range(7):
+        if day.weekday() < 5:
+            return day
+        day -= timedelta(days=1)
     return None
 
 
@@ -392,7 +414,7 @@ async def _daily_scheduler_loop() -> None:
     forecast_at = _parse_hhmm(settings.AI_FORECAST_TIME, dtime(8, 45))
     last_screen_date = None
     last_brief_date = None
-    last_learning_date = _last_learning_date()   # a restart doesn't repeat today's learning cycle
+    last_learning_date = _last_learning_date(learn_at)   # a restart doesn't repeat a learning cycle
     last_forecast_date = None
     outlook_times = [_parse_hhmm(t.strip(), dtime(20, 0)) for t in settings.AI_OUTLOOK_TIMES.split(",") if t.strip()]
     last_outlook_run: set[tuple] = set()
@@ -409,6 +431,21 @@ async def _daily_scheduler_loop() -> None:
                         enqueue_ai_outlook()
                     last_outlook_run.add(key)
             active = learning_active()   # paused: research/learning jobs wait (and run on resume, same day)
+            # A missed or failed outlook (app off at the slot, AI quota out, model unreachable) is
+            # retried until the next session has one, so a late start still gets today's NIFTY odds.
+            if (active and settings.AI_ANALYST_ENABLED
+                    and (_last_outlook_attempt is None
+                         or time.monotonic() - _last_outlook_attempt >= OUTLOOK_RETRY_SECONDS)):
+                with db_session() as db:
+                    missing = ai_analyst_service.latest_outlook(db) is None
+                if missing:
+                    logger.info("No AI outlook for the next session yet — trying again")
+                    enqueue_ai_outlook()
+            # A learning cycle missed because the app was off at its time runs when the app starts.
+            due = _learning_due_date(now, learn_at)
+            if active and due is not None and (last_learning_date is None or last_learning_date < due):
+                await run_learning_now(trigger="catch-up" if due != now.date() else "scheduled")
+                last_learning_date = due
             if now.weekday() < 5:
                 prefs = general()       # read each pass: Settings -> General changes apply without a restart
                 if (active and prefs["discovery_enabled"] and last_screen_date != now.date()
@@ -437,9 +474,6 @@ async def _daily_scheduler_loop() -> None:
                     # Idempotent: stocks already forecast today are skipped.
                     enqueue_ai_forecasts()
                     last_forecast_date = now.date()
-                if active and last_learning_date != now.date() and now.time() >= learn_at:
-                    await run_learning_now()
-                    last_learning_date = now.date()
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # noqa: BLE001

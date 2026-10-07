@@ -763,6 +763,16 @@ async def get_ai_outlook(db: Session = Depends(get_db)):
     return ai_analyst_service.outlook_payload(ai_analyst_service.latest_outlook(db))
 
 
+@router.get("/ai/outlook-status")
+async def get_ai_outlook_status():
+    """Why there is no outlook yet: the last attempt's state ('none', 'queued', 'failed', 'ok') and reason."""
+    from llm_service import llm_service
+    status = dict(ai_analyst_service.outlook_status)
+    if status["state"] == "queued" and llm_service.last_error.get("background"):
+        status["reason"] = f"waiting — last AI call failed: {llm_service.last_error['background']}"
+    return status
+
+
 @router.get("/ai/outlooks")
 async def get_ai_outlooks(limit: int = 20, db: Session = Depends(get_db)):
     from models import AIMarketOutlook

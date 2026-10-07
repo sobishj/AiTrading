@@ -152,6 +152,13 @@ export interface SectorImpact {
   reason: string;
 }
 
+/** The last attempt at the next-session outlook — why there is none yet. */
+export interface OutlookStatus {
+  state: "none" | "queued" | "failed" | "ok";
+  reason: string | null;
+  at: string | null;
+}
+
 export interface MarketOutlook {
   id: number;
   session_date: string;
