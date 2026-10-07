@@ -128,6 +128,7 @@ class LLMService:
         self._queue: Optional[asyncio.Queue] = None
         self._worker: Optional[asyncio.Task] = None
         self._busy = False
+        self.local_selected = True   # set by reload_profiles(); False keeps embeddings off the local server
         self.last_interactive_at = 0.0  # monotonic time of the last user chat (background work yields to it)
 
     # ------------------------------------------------------------------
@@ -158,6 +159,11 @@ class LLMService:
                 practice_id = None
             ids = {"chat": cfg.chat_profile_id if cfg else first.id, "background": background_id,
                    "practice": practice_id or background_id}
+            # A local runtime (Bionic…) is only contacted when a local model is selected for a role or enabled.
+            selected_local = [p for p in db.query(LLMProfile).all()
+                              if p.is_local and (p.enabled or p.id in ids.values())]
+            self.local_selected = bool(selected_local)
+            bionic_wanted = any("bionic" in (p.name or "").lower() for p in selected_local)
             for role, profile_id in ids.items():
                 p = db.get(LLMProfile, profile_id)
                 self._active[role] = ActiveProfile(
@@ -166,6 +172,8 @@ class LLMService:
                     allow_practice=bool(p.allow_practice), updated_at=p.updated_at or datetime.utcnow(),
                 ) if p else None
         self._availability.clear()
+        from local_runtime import local_runtime
+        local_runtime.sync(bionic_wanted)   # launch / close Bionic when a Settings change selects / drops it
         for role in ROLES:
             p = self._active[role]
             if p:
@@ -447,7 +455,10 @@ class LLMService:
     # Embeddings (used by memory_service for semantic search over past setups)
     # ------------------------------------------------------------------
     async def embed_text(self, text: str) -> list[float]:
-        """Embedding from the local server; deterministic pseudo-embedding when it isn't available."""
+        """Embedding from the local server; deterministic pseudo-embedding when it isn't available
+        or no local model is selected (the local runtime isn't expected to be running then)."""
+        if not self.local_selected:
+            return _pseudo_embedding(text)
         try:
             response = await self._embed_client.with_options(timeout=20.0, max_retries=0).embeddings.create(
                 model=settings.LLM_EMBEDDING_MODEL, input=text)

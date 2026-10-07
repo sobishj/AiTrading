@@ -29,6 +29,7 @@ import type {
   AIPerformance,
   MarketOutlook,
   OutlookStatus,
+  LocalRuntime,
   AIPredictionRow,
   AppSettings,
   AppStatus,
@@ -236,6 +237,11 @@ class ApiService {
 
   async getAIOutlook(): Promise<MarketOutlook | null> {
     const { data } = await this.client.get<MarketOutlook | null>("/ai/outlook");
+    return data;
+  }
+
+  async getLocalRuntime(): Promise<LocalRuntime> {
+    const { data } = await this.client.get<LocalRuntime>("/llm/local-runtime");
     return data;
   }
 

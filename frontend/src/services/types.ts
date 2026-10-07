@@ -152,6 +152,16 @@ export interface SectorImpact {
   reason: string;
 }
 
+/** Bionic (local model runtime): launched/closed as a Bionic model is selected/dropped in Settings. */
+export interface LocalRuntime {
+  selected: boolean;
+  installed: boolean;
+  running: boolean;
+  serving: boolean;
+  state: "serving" | "starting" | "no_server" | "stopped" | "error" | "unsupported";
+  error: string | null;
+}
+
 /** The last attempt at the next-session outlook — why there is none yet. */
 export interface OutlookStatus {
   state: "none" | "queued" | "failed" | "ok";

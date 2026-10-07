@@ -177,14 +177,16 @@ class AIOrchestrator:
 
     @staticmethod
     def fallback_profile(db: Session, exclude: set[int]) -> Optional[ProfileSnapshot]:
-        """The local model to fall back to (background profile if local, else any local profile)."""
+        """The local model to fall back to (background profile if local, else any enabled local profile).
+        A local model that is switched off is never used: its runtime may not be running, by choice."""
         cfg = db.get(AppSettings, 1)
         candidates = []
         if cfg and cfg.background_profile_id:
             bg = db.get(LLMProfile, cfg.background_profile_id)
             if bg is not None:
                 candidates.append(bg)
-        candidates += db.query(LLMProfile).order_by(LLMProfile.priority, LLMProfile.id).all()
+        candidates += (db.query(LLMProfile).filter(LLMProfile.enabled.is_(True))
+                       .order_by(LLMProfile.priority, LLMProfile.id).all())
         for p in candidates:
             if p.is_local and p.id not in exclude:
                 return ProfileSnapshot.of(p)

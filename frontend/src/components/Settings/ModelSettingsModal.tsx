@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import LocalRuntimeStatus from "./LocalRuntimeStatus";
 import apiService from "../../services/api";
 import InfoTip from "../common/InfoTip";
 import type { LLMPreset, LLMProfile, LLMProfilesResponse, ModelCostStats, ModelCredit, ModelPresets, ModelSpend, ModelUsage, ProviderKind } from "../../services/types";
@@ -601,6 +602,7 @@ export default function ModelSettingsModal({ onClose, onChanged, embedded = fals
           </div>
         )}
         {!draft && message && <p className={`text-xs ${message.ok ? "text-neon-emerald" : "text-neon-rose"}`}>{message.text}</p>}
+        {!draft && <LocalRuntimeStatus refreshKey={data} />}
 
         <section className="flex items-center justify-between glass-panel px-3 py-2">
           <span className="text-xs text-slate-300">Windows notifications for holding alerts (stop-loss, target, loss risk)</span>

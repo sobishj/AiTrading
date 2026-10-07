@@ -1,5 +1,6 @@
 <#
-  Start AiTrading: database (Docker), local LLM (Bionic), backend, frontend, then open the UI in Chrome.
+  Start AiTrading: database (Docker), local LLM (Bionic, only if a local model is selected in Settings),
+  backend, frontend, then open the UI in Chrome.
 
   Safe to run again at any time: anything already running is left alone.
   Double-click start-aitrading.bat, or run:
@@ -82,9 +83,21 @@ if (Wait-Until $dbReady 60 "PostgreSQL") { Ok "PostgreSQL is up (port 5433)." }
 # ---------------------------------------------------------------- 2. Local LLM (Bionic) - optional
 Step "Local AI model (Bionic on port 1234)"
 $llmReady = { try { Invoke-RestMethod -Uri "http://localhost:1234/v1/models" -TimeoutSec 3 | Out-Null; $true } catch { $false } }
-if (& $llmReady) {
+# Started only when a local model is selected in Settings (enabled, or chosen for chat/background/practice).
+# On a fresh install (no models saved yet) the app defaults to Bionic, so it is started then too.
+$localSql = "select case when not exists (select 1 from llm_profiles) then 1 else (select count(*) from llm_profiles p " +
+            "left join app_settings s on s.id = 1 where p.kind <> 'anthropic' and (p.base_url ilike '%localhost%' " +
+            "or p.base_url ilike '%127.0.0.1%') and (p.enabled or p.id in (s.chat_profile_id, s.background_profile_id, " +
+            "s.practice_profile_id))) end"
+$localCount = (docker exec aitrading-pg psql -U aitrading -d aitrading -tAc $localSql 2>$null)
+$localWanted = -not ("$localCount".Trim() -match '^\d+$') -or [int]"$localCount".Trim() -gt 0
+if (-not $localWanted) {
+    Ok "No local model selected in Settings - Bionic not started (AI runs on your cloud model)."
+} elseif (& $llmReady) {
     Ok "Bionic is already serving."
 } elseif (Test-Path $BionicExe) {
+    # Bionic is an Electron app; ELECTRON_RUN_AS_NODE (set in VS Code terminals) would make it exit at once.
+    Remove-Item Env:ELECTRON_RUN_AS_NODE -ErrorAction SilentlyContinue
     Start-Process $BionicExe
     if (Wait-Until $llmReady 60 "Bionic's server") {
         Ok "Bionic is serving."

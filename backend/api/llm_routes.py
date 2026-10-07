@@ -155,6 +155,13 @@ async def delete_profile(profile_id: int, db: Session = Depends(get_db)):
         llm_service.reload_profiles()
 
 
+@router.get("/llm/local-runtime")
+def local_runtime_status():
+    """Bionic's state for the Settings popup: stopped, starting, no_server, serving, error (sync: probes block)."""
+    from local_runtime import local_runtime
+    return local_runtime.status()
+
+
 @router.get("/llm/status")
 async def provider_status(db: Session = Depends(get_db)):
     """Connected / unavailable for every saved model (quick parallel probe; one failing provider never blocks the rest)."""
