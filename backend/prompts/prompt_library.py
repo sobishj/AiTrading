@@ -203,6 +203,7 @@ MARKET_OUTLOOK_PROMPT = """You are AiTrading's market strategist. The next NSE t
 Last session: {last_session}
 Global markets now: {global_markets}
 FII/DII flows: {flows}
+Market signals alone (trend, 50-day EMA, US close, FII flow, VIX) put the chance of a higher close at {baseline}. Move away from that only for news that clearly outweighs those signals; a single company's results rarely moves the index.
 Headlines since the last close (newest first):
 {headlines}
 

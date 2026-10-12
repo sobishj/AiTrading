@@ -76,6 +76,13 @@ function OutlookDetails({ outlook }: { outlook: MarketOutlook }) {
         <span className={`pill border mr-2 ${BIAS_STYLES[outlook.bias] ?? BIAS_STYLES.flat}`}>{outlook.bias.toUpperCase()}</span>
         {outlook.probability_up.toFixed(0)}% chance NIFTY closes higher. {outlook.summary}
       </p>
+      {outlook.model_probability_up != null && outlook.baseline_probability_up != null && (
+        <p className="text-[11px] text-slate-500">
+          AI said {outlook.model_probability_up.toFixed(0)}%; market signals alone say{" "}
+          {outlook.baseline_probability_up.toFixed(0)}%{outlook.baseline_reasons ? ` (${outlook.baseline_reasons})` : ""}.
+          The figure above blends the two.
+        </p>
+      )}
       {outlook.sector_impacts.length > 0 && (
         <ul className="text-xs space-y-0.5">
           {outlook.sector_impacts.map((s) => (

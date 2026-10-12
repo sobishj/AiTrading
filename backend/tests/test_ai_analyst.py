@@ -97,3 +97,49 @@ def test_next_session_date_rules():
     assert str(nxt(datetime(2026, 9, 24, 20, 0, tzinfo=IST))) == "2026-09-25"  # Thu evening -> Fri
     assert str(nxt(datetime(2026, 9, 25, 20, 0, tzinfo=IST))) == "2026-09-28"  # Fri evening -> Mon
     assert str(nxt(datetime(2026, 9, 26, 12, 0, tzinfo=IST))) == "2026-09-28"  # Saturday -> Mon
+
+
+# The 12 Oct 2026 miss: a small local model said 70% up on one bank's results while every hard
+# signal pointed down; NIFTY fell ~150 points.
+OCT_9_OVERVIEW = {
+    "nifty": {"price": 22520, "trend": "downtrend", "ema_50": 23431},
+    "indices": [{"name": "S&P 500", "change_pct": -0.47}, {"name": "Nasdaq", "change_pct": -1.25},
+                {"name": "Hang Seng", "change_pct": 1.79}],
+    "fii_dii": {"fii_activity": -12944, "dii_activity": 10703},
+    "vix": 14.4,
+}
+
+
+def test_market_signals_baseline_reads_the_hard_numbers():
+    from ai_analyst_service import BASELINE_FLOOR, market_signals_baseline
+    p, reasons = market_signals_baseline(OCT_9_OVERVIEW)
+    assert p == BASELINE_FLOOR                       # everything bearish -> the floor, never below
+    assert reasons == ["downtrend", "below 50-day EMA", "US markets -0.9%", "FII selling ₹12,944 cr"]
+    bullish = {"nifty": {"price": 25000, "trend": "uptrend", "ema_50": 24000},
+               "indices": [{"name": "S&P 500", "change_pct": 1.0}, {"name": "Nasdaq", "change_pct": 1.4}],
+               "fii_dii": {"fii_activity": 6000}, "vix": 12}
+    assert market_signals_baseline(bullish)[0] > 65
+    assert market_signals_baseline({}) == (50.0, [])   # no data -> no opinion
+
+
+def test_blend_stops_one_headline_flipping_the_call():
+    from ai_analyst_service import blend_outlook, market_signals_baseline, outlook_bias
+    baseline, _ = market_signals_baseline(OCT_9_OVERVIEW)
+    local = blend_outlook(70, baseline, local_model=True)
+    assert local == 46.0 and outlook_bias(local) == "flat"     # was "up 70%"
+    assert outlook_bias(blend_outlook(30, baseline, local_model=True)) == "down"
+    # A cloud model gets more say, but still can't override everything.
+    assert blend_outlook(70, baseline, local_model=False) == 54.0
+    assert outlook_bias(blend_outlook(90, 70, local_model=False)) == "up"
+
+
+def test_friday_outlook_for_monday_is_remade_before_the_open():
+    from datetime import date, datetime
+    from types import SimpleNamespace
+    from ai_analyst_service import IST, AIAnalystService
+    stale = AIAnalystService.outlook_is_stale
+    friday_call = SimpleNamespace(session_date=date(2026, 10, 12), created_at=datetime(2026, 10, 9, 10, 24))  # UTC
+    assert stale(friday_call, datetime(2026, 10, 12, 8, 30, tzinfo=IST))        # Monday pre-market: remake
+    assert not stale(friday_call, datetime(2026, 10, 12, 9, 20, tzinfo=IST))    # after the open: keep, never redo
+    sunday_call = SimpleNamespace(session_date=date(2026, 10, 12), created_at=datetime(2026, 10, 11, 14, 30))
+    assert not stale(sunday_call, datetime(2026, 10, 12, 8, 30, tzinfo=IST))    # Sunday 20:00 call is fresh enough

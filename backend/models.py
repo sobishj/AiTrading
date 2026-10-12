@@ -334,7 +334,10 @@ class AIMarketOutlook(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     session_date: Mapped[date] = mapped_column(Date, nullable=False, index=True)
     bias: Mapped[str] = mapped_column(String(10), nullable=False)               # up / down / flat
-    probability_up: Mapped[float] = mapped_column(Numeric, nullable=False)
+    probability_up: Mapped[float] = mapped_column(Numeric, nullable=False)   # final: AI blended with the baseline
+    model_probability_up: Mapped[float | None] = mapped_column(Numeric, nullable=True)     # the AI's own answer
+    baseline_probability_up: Mapped[float | None] = mapped_column(Numeric, nullable=True)  # market signals alone
+    baseline_reasons: Mapped[str | None] = mapped_column(Text, nullable=True)
     summary: Mapped[str | None] = mapped_column(Text, nullable=True)
     sector_impacts_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     headlines_considered: Mapped[int] = mapped_column(Integer, default=0)

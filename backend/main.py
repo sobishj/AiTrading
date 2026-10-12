@@ -437,9 +437,10 @@ async def _daily_scheduler_loop() -> None:
                     and (_last_outlook_attempt is None
                          or time.monotonic() - _last_outlook_attempt >= OUTLOOK_RETRY_SECONDS)):
                 with db_session() as db:
-                    missing = ai_analyst_service.latest_outlook(db) is None
+                    latest = ai_analyst_service.latest_outlook(db)
+                    missing = latest is None or ai_analyst_service.outlook_is_stale(latest)
                 if missing:
-                    logger.info("No AI outlook for the next session yet — trying again")
+                    logger.info("No fresh AI outlook for the next session yet — trying again")
                     enqueue_ai_outlook()
             # A learning cycle missed because the app was off at its time runs when the app starts.
             due = _learning_due_date(now, learn_at)
@@ -505,7 +506,8 @@ async def lifespan(app: FastAPI):
     if settings.AI_ANALYST_ENABLED:
         with db_session() as db:
             latest = ai_analyst_service.latest_outlook(db)
-            if latest is None or latest.session_date < ai_analyst_service.next_session_date():
+            if (latest is None or latest.session_date < ai_analyst_service.next_session_date()
+                    or ai_analyst_service.outlook_is_stale(latest)):
                 enqueue_ai_outlook()
     _background_tasks.extend([
         asyncio.create_task(_practice_loop()),

@@ -32,6 +32,7 @@ Every forecast keeps its exact prompt and raw answer, so the graded history
 doubles as a fine-tuning dataset (training_examples) for later.
 """
 import json
+import math
 import random
 import hashlib
 import re
@@ -89,6 +90,64 @@ INTERACTIVE_COOLDOWN_SECONDS = 120       # pause practice this long after the us
 
 # Next-session outlook
 OUTLOOK_HEADLINES = 25
+# An outlook made this long before its session (e.g. Friday's call for Monday) is remade before the
+# open, so it sees the weekend's news and the latest US close.
+OUTLOOK_MAX_AGE_HOURS = 14
+NSE_OPEN = (9, 15)
+# The market-signals baseline is a rule of thumb, so it never claims more than this.
+BASELINE_FLOOR, BASELINE_CEILING = 30.0, 70.0
+# How far the AI may pull the final probability away from the baseline. A small local model has
+# anchored on a single headline against every hard signal (12 Oct 2026: 70% up, NIFTY fell), so it
+# gets less say than a cloud model.
+OUTLOOK_AI_WEIGHT_LOCAL, OUTLOOK_AI_WEIGHT_CLOUD = 0.4, 0.6
+OUTLOOK_UP_AT, OUTLOOK_DOWN_AT = 55.0, 45.0     # final probability -> bias; in between is "flat"
+
+
+def market_signals_baseline(overview: dict) -> tuple[float, list[str]]:
+    """
+    A rule-of-thumb chance (%) that NIFTY closes higher next session, from the hard numbers only:
+    trend, price vs the 50-day EMA, the US close, the FII flow and VIX. Logistic on a small score,
+    clamped to BASELINE_FLOOR..BASELINE_CEILING. Its own hit rate is tracked beside the AI's.
+    """
+    score, reasons = 0.0, []
+    nifty = overview.get("nifty") or {}
+    if nifty.get("trend") in ("uptrend", "downtrend"):
+        score += 0.3 if nifty["trend"] == "uptrend" else -0.3
+        reasons.append(nifty["trend"])
+    price, ema_50 = nifty.get("price"), nifty.get("ema_50")
+    if price and ema_50:
+        above = price >= ema_50
+        score += 0.2 if above else -0.2
+        reasons.append(f"{'above' if above else 'below'} 50-day EMA")
+    changes = {i["name"]: i.get("change_pct") for i in overview.get("indices") or []}
+    us = [changes[n] for n in ("S&P 500", "Nasdaq") if changes.get(n) is not None]
+    if us and abs(sum(us) / len(us)) >= 0.3:
+        avg = sum(us) / len(us)
+        score += max(-0.4, min(0.4, avg * 0.3))
+        reasons.append(f"US markets {avg:+.1f}%")
+    fii = (overview.get("fii_dii") or {}).get("fii_activity")
+    if fii is not None and abs(fii) >= 2000:
+        score += max(-0.3, min(0.3, fii / 10000 * 0.25))
+        reasons.append(f"FII {'buying' if fii > 0 else 'selling'} ₹{abs(fii):,.0f} cr")
+    vix = overview.get("vix")
+    if vix is not None and vix > 20:
+        score -= 0.15
+        reasons.append(f"VIX {vix:.0f} (high)")
+    probability = 100 / (1 + math.exp(-score))
+    return round(max(BASELINE_FLOOR, min(BASELINE_CEILING, probability)), 1), reasons
+
+
+def blend_outlook(model_probability: float, baseline: float, local_model: bool) -> float:
+    weight = OUTLOOK_AI_WEIGHT_LOCAL if local_model else OUTLOOK_AI_WEIGHT_CLOUD
+    return round(baseline + weight * (model_probability - baseline), 1)
+
+
+def outlook_bias(probability_up: float) -> str:
+    if probability_up >= OUTLOOK_UP_AT:
+        return "up"
+    if probability_up <= OUTLOOK_DOWN_AT:
+        return "down"
+    return "flat"
 
 
 def background_model_name() -> str:
@@ -883,12 +942,14 @@ class AIAnalystService:
         sectors = sorted({sector for _, _, sector, _ in UNIVERSE} |
                          {s.sector for s in db.query(Stock).filter(Stock.sector.isnot(None)).all()})
         _, lessons = self.current_lessons(db)
+        baseline, baseline_reasons = market_signals_baseline(overview)
         prompt = PromptLibrary.market_outlook(
             session_date=f"{session:%A %d %b %Y}",
             last_session=overview["summary"],
             global_markets=global_markets,
             flows=(f"FII net ₹{flows['fii_activity']:,.0f} cr, DII net ₹{flows['dii_activity']:,.0f} cr ({flows.get('date')})"
                    if flows.get("fii_activity") is not None else "unavailable"),
+            baseline=f"{baseline:.0f}%" + (f" ({'; '.join(baseline_reasons)})" if baseline_reasons else ""),
             headlines="\n".join(f"- {h['title']}" for h in headlines) or "none",
             track_record=self.outlook_track_record_text(db),
             lessons=self.lessons_block(lessons),
@@ -906,8 +967,12 @@ class AIAnalystService:
         summary = next((m.group(1).strip() for m in re.finditer(r"^\W*SUMMARY\W*[:=]\s*(.+)$", text,
                                                                   re.IGNORECASE | re.MULTILINE)), "")
         version, _ = self.current_lessons(db)
+        profile = llm_service.active("background")
+        final = blend_outlook(parsed["probability_up"], baseline, local_model=bool(profile and profile.is_local))
         outlook = AIMarketOutlook(
-            session_date=session, bias=parsed["direction"], probability_up=parsed["probability_up"],
+            session_date=session, bias=outlook_bias(final), probability_up=final,
+            model_probability_up=parsed["probability_up"], baseline_probability_up=baseline,
+            baseline_reasons="; ".join(baseline_reasons) or None,
             summary=summary[:600], sector_impacts_json=json.dumps(parse_sector_impacts(text, sectors)),
             headlines_considered=len(headlines), lessons_version=version, model=background_model_name(),
             prompt_text=prompt, raw_response=text,
@@ -915,7 +980,8 @@ class AIAnalystService:
         db.add(outlook)
         db.commit()
         db.refresh(outlook)
-        logger.info("AI market outlook for %s: %s (%.0f%% up)", session, outlook.bias, float(outlook.probability_up))
+        logger.info("AI market outlook for %s: %s (%.0f%% up; AI %.0f%%, market signals %.0f%%)", session,
+                    outlook.bias, final, parsed["probability_up"], baseline)
         self.outlook_status = {"state": "ok", "reason": None, "at": datetime.now(timezone.utc).isoformat()}
         return outlook
 
@@ -937,6 +1003,16 @@ class AIAnalystService:
                 .order_by(AIMarketOutlook.created_at.desc()).first())
 
     @staticmethod
+    def outlook_is_stale(outlook: AIMarketOutlook, now: Optional[datetime] = None) -> bool:
+        """Made more than OUTLOOK_MAX_AGE_HOURS ago and its session hasn't opened: remake it with fresh
+        news and global cues. Never after the open (a forecast made mid-session would be cheating)."""
+        now = now or datetime.now(IST)
+        opens = datetime(outlook.session_date.year, outlook.session_date.month, outlook.session_date.day,
+                         *NSE_OPEN, tzinfo=IST)
+        made = outlook.created_at.replace(tzinfo=timezone.utc)   # stored as naive UTC
+        return now < opens and now - made > timedelta(hours=OUTLOOK_MAX_AGE_HOURS)
+
+    @staticmethod
     def outlook_payload(outlook: Optional[AIMarketOutlook]) -> Optional[dict]:
         if outlook is None:
             return None
@@ -945,6 +1021,11 @@ class AIAnalystService:
             "session_date": outlook.session_date.isoformat(),
             "bias": outlook.bias,
             "probability_up": float(outlook.probability_up),
+            "model_probability_up": (float(outlook.model_probability_up)
+                                     if outlook.model_probability_up is not None else None),
+            "baseline_probability_up": (float(outlook.baseline_probability_up)
+                                        if outlook.baseline_probability_up is not None else None),
+            "baseline_reasons": outlook.baseline_reasons,
             "summary": outlook.summary,
             "sector_impacts": json.loads(outlook.sector_impacts_json or "[]"),
             "headlines_considered": outlook.headlines_considered,
@@ -987,8 +1068,15 @@ class AIAnalystService:
         graded = db.query(AIMarketOutlook).filter(AIMarketOutlook.graded_at.isnot(None)).all()
         n = len(graded)
         if n == 0:
-            return {"graded": 0, "hit_rate": None, "total": db.query(AIMarketOutlook).count()}
+            return {"graded": 0, "hit_rate": None, "baseline_graded": 0, "baseline_hit_rate": None,
+                    "total": db.query(AIMarketOutlook).count()}
+        # The market-signals baseline graded on the same sessions, so the AI must beat it to earn its say.
+        with_baseline = [o for o in graded if o.baseline_probability_up is not None]
+        baseline_hits = sum(1 for o in with_baseline
+                            if is_correct(outlook_bias(float(o.baseline_probability_up)), float(o.actual_return_pct)))
         return {"graded": n, "hit_rate": round(sum(1 for o in graded if o.correct) / n * 100, 1),
+                "baseline_graded": len(with_baseline),
+                "baseline_hit_rate": round(baseline_hits / len(with_baseline) * 100, 1) if with_baseline else None,
                 "total": db.query(AIMarketOutlook).count()}
 
     def outlook_track_record_text(self, db: Session) -> str:

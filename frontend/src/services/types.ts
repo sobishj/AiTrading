@@ -174,6 +174,10 @@ export interface MarketOutlook {
   session_date: string;
   bias: "up" | "down" | "flat";
   probability_up: number;
+  /** The AI's own answer and the market-signals baseline it was blended with (null on older outlooks). */
+  model_probability_up?: number | null;
+  baseline_probability_up?: number | null;
+  baseline_reasons?: string | null;
   summary: string | null;
   sector_impacts: SectorImpact[];
   headlines_considered: number;
