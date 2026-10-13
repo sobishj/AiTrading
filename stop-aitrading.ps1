@@ -32,7 +32,7 @@ Set-Content -Path $StopFlag -Value (Get-Date -Format o)
 
 # Only stop a backend port that is actually AiTrading (8000 may belong to another program).
 $backendStopped = $false
-foreach ($port in 8000, 8010) {
+foreach ($port in 8000, 8010, 8020) {   # run-backend.ps1 takes the first free one
     try {
         $health = Invoke-RestMethod -Uri "http://localhost:$port/health" -TimeoutSec 3
         if ($health.app -eq "AiTrading") { $backendStopped = (Stop-Server $port "AiTrading backend") -or $backendStopped }

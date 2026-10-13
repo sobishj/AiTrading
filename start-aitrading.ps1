@@ -111,19 +111,28 @@ if (-not $localWanted) {
 
 # ---------------------------------------------------------------- 3. Backend
 Step "Backend (FastAPI)"
-$BackendPort = $null
-foreach ($p in 8000, 8010) { if (Test-AiTradingBackend $p) { $BackendPort = $p; break } }
+# Same ports, same order as run-backend.ps1: 8000 unless another program holds it (starting Docker
+# above also restarts other projects' containers, and one of them may publish 8000).
+$BackendPorts = 8000, 8010, 8020
+function Find-AiTradingBackend { foreach ($p in $BackendPorts) { if (Test-AiTradingBackend $p) { return $p } }; return $null }
+$BackendPort = Find-AiTradingBackend
 if ($BackendPort) {
     Ok "Already running on port $BackendPort."
 } else {
-    if (Test-PortListening 8000) { throw "Port 8000 is in use by another program - close it and run this again." }
-    $BackendPort = 8000
+    $busy = @($BackendPorts | Where-Object { Test-PortListening $_ })
+    if ($busy.Count -eq $BackendPorts.Count) { throw "Ports $($BackendPorts -join ', ') are all in use by other programs - free one and run this again." }
+    if ($busy -contains 8000) { Warn "Port 8000 is used by another program - AiTrading will use the next free port." }
     # Hidden background runner: keeps the backend (and so learning) going without a window, and
     # restarts it if it ever stops. stop-aitrading.bat stops it for good.
     $Runner = Join-Path $Root "run-backend.ps1"
     Start-Process powershell.exe -WindowStyle Hidden -ArgumentList @(
         "-NoProfile", "-ExecutionPolicy", "Bypass", "-WindowStyle", "Hidden", "-File", "`"$Runner`"")
-    if (Wait-Until { Test-AiTradingBackend $BackendPort } 120 "the backend") { Ok "Backend is up on port $BackendPort (running in the background)." }
+    if (Wait-Until { $null -ne (Find-AiTradingBackend) } 120 "the backend") {
+        $BackendPort = Find-AiTradingBackend
+        Ok "Backend is up on port $BackendPort (running in the background)."
+    } else {
+        $BackendPort = 8000
+    }
 }
 
 # ---------------------------------------------------------------- 4. Frontend

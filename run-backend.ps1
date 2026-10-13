@@ -19,7 +19,11 @@ $Python     = Join-Path $BackendDir "venv\Scripts\python.exe"
 $StopFlag   = Join-Path $BackendDir ".stop-background"
 $LogDir     = Join-Path $BackendDir "logs"
 $Log        = Join-Path $LogDir "backend-runner.log"
-$Port       = 8000
+# 8000 first; if another program holds it (Docker Desktop restarts other projects' containers, e.g. one
+# publishing 8000, as soon as this script starts Docker), the next free one. start-aitrading.ps1 and
+# stop-aitrading.ps1 look on the same ports.
+$Ports      = 8000, 8010, 8020
+$Port       = $Ports[0]
 $DockerExe  = "C:\Program Files\Docker\Docker\Docker Desktop.exe"
 
 New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
@@ -47,8 +51,19 @@ function Write-RunnerLog([string]$Text) {
 }
 
 function Test-Backend {
-    try { return (Invoke-RestMethod -Uri "http://localhost:$Port/health" -TimeoutSec 3).app -eq "AiTrading" }
-    catch { return $false }
+    # An AiTrading backend serving on any of our ports (ours, or one started by hand).
+    foreach ($p in $Ports) {
+        try { if ((Invoke-RestMethod -Uri "http://localhost:$p/health" -TimeoutSec 3).app -eq "AiTrading") { return $true } }
+        catch { }
+    }
+    return $false
+}
+
+function Select-FreePort {
+    foreach ($p in $Ports) {
+        if (-not (Get-NetTCPConnection -LocalPort $p -State Listen -ErrorAction SilentlyContinue)) { return $p }
+    }
+    return $null
 }
 
 function Wait-Database {
@@ -74,7 +89,10 @@ while (-not (Test-Path $StopFlag)) {
     if (Test-Backend) { Start-Sleep -Seconds 30; continue }    # someone else's backend is serving: watch it
     if (-not (Wait-Database)) { Write-RunnerLog "database not available yet; retrying"; Start-Sleep -Seconds 30; continue }
 
-    Write-RunnerLog "starting backend"
+    # Chosen after Docker is up, so a container that grabbed 8000 on Docker's start is already visible.
+    $Port = Select-FreePort
+    if ($null -eq $Port) { Write-RunnerLog "ports $($Ports -join ', ') are all in use; retrying"; Start-Sleep -Seconds 30; continue }
+    Write-RunnerLog "starting backend on port $Port"
     $started = Get-Date
     $env:AITRADING_RUNNER = "1"
     $env:PYTHONIOENCODING = "utf-8"
